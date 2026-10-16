@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.2.0
-// @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): ledige tider, booking, afbestilling og maskinstatus.
+// @version      0.3.0
+// @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
 // @inject-into  page
@@ -18,9 +18,11 @@
   const BASE = (location.pathname.match(/^\/[^/]+\//) || ['/DB0073/'])[0];
   const KEY = 'vt:';
   const WEEKDAYS = ['søn', 'man', 'tir', 'ons', 'tor', 'fre', 'lør'];
+  const WEEKDAYS_LONG = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
-  const ALL = '*';
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
+  // Standard-rækkefølge (kan ændres under Indstillinger).
+  const DEFAULT_ORDER = ['Rytterbakken', 'Sokkelundsvej', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem(KEY + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -43,6 +45,7 @@
 
   let cur = null; // senest hentede side ({url, doc}) – udgangspunkt for postbacks
   let ctx = null; // hvor serveren står lige nu: {term, page: 'main'|'calendar', week}
+  let sessTerm = null; // vaskeriet serveren har valgt i sessionen (overlever sideskift)
 
   // Én kø, fordi serveren husker valgt vaskeri i sessionen. Brugerhandlinger (prio) springer
   // foran baggrundshentninger, som er delt op i små job (ét vaskeri ad gangen).
@@ -58,8 +61,8 @@
       pump();
     });
   }
-  // Mens en booking er i gang, må baggrundsjob ikke flytte serveren til et andet vaskeri.
-  const paused = () => !!(S.sheet && S.sheet.kind === 'book' && ['loading', 'choose', 'booking'].includes(S.sheet.phase));
+  // Mens bookingvinduet er åbent, må baggrundsjob ikke flytte serveren til et andet vaskeri.
+  const paused = () => !!(S.sheet && S.sheet.kind === 'book' && S.sheet.phase !== 'done');
   async function pump() {
     if (running) return;
     running = true;
@@ -109,10 +112,12 @@
     const page = { url: r.url, doc };
     if (/\/ErrorPages\//i.test(r.url)) {
       cur = null;
+      sessTerm = null;
       throw new VtError('SERVER', pageMessage(doc) || 'Fejl hos vasketur.dk');
     }
     if (!allowLogin && isLoginPage(doc)) {
       cur = null;
+      sessTerm = null;
       throw new VtError('LOGIN', 'Du er ikke logget ind');
     }
     cur = page;
@@ -175,6 +180,7 @@
   const creds = () => store.get('creds', null);
 
   async function login(user, pass) {
+    sessTerm = null;
     const p = await request(BASE + 'Default.aspx', {}, true);
     const res = await post(p, {
       __EVENTTARGET: 'ctl00$ContentPlaceHolder1$btOK',
@@ -224,6 +230,7 @@
     if (!t) throw new VtError('PARSE', `Fandt ikke vaskeriet "${name}"`);
     const main = await postback(sel, t.pb.target, t.pb.arg); // -> BookingMain.aspx
     ctx = { term: name, page: 'main' };
+    sessTerm = name;
     return main;
   }
 
@@ -269,14 +276,15 @@
       }
       if (ctx.page === 'main') return openCalendar(cur, week, term);
     }
+    // Serveren har stadig vaskeriet valgt (fx efter en booking): gå direkte via "Bestille"-linket.
+    if (sessTerm === term && cur && cur.doc.querySelector('a[href*="LinkBooking"]')) return openCalendar(cur, week, term);
     return openCalendar(await openTerminal(term), week, term);
   }
 
   function calendarDates(doc, week) {
     const joined = texts(doc).join(' ');
     const nums = [...joined.matchAll(/\b(Man|Tir|Ons|Tor|Fre|Lør|Søn)\s+(\d{1,2})\b/g)].slice(0, 7).map((m) => +m[2]);
-    const anchor = dayTs(week * 7);
-    let first = new Date(anchor);
+    let first = new Date(dayTs(week * 7));
     if (nums.length) {
       let best = null;
       for (let off = -10; off <= 10; off++) {
@@ -311,17 +319,18 @@
     const t = texts(page.doc).join(' ');
     const quota = (/Du har (\d+) bestillinger tilbage/i.exec(t) || [])[1];
     const options = [...page.doc.querySelectorAll('input[name*="bt2Maskingrupp"]')]
-      .map((e) => ({ name: e.name, label: e.value, disabled: e.disabled }));
+      .map((e) => ({ name: e.name, label: e.value.trim(), disabled: e.disabled || /aspNetDisabled/.test(e.className) }));
     const rnd = page.doc.querySelector('input[name$="btMaskingruppRandom"]');
-    if (!options.length && !rnd) throw new VtError('BOOK', pageMessage(page.doc) || 'Kunne ikke vælge maskine');
+    if (!options.length && !rnd) throw new VtError('BOOK', pageMessage(page.doc) || 'Ingen ledige maskiner');
     return { page, quota: quota != null ? +quota : null, options, random: rnd ? { name: rnd.name } : null };
   }
 
+  // Åbner maskinvalget for et tidsrum. Booker ikke noget – det sker først ved klik på en maskine.
   async function startBooking(term, week, cellId, retry = true) {
     try {
       const cal = await gotoCalendar(term, week);
       const cell = parseCalendar(cal, week).cells.find((c) => c.id === cellId);
-      if (!cell || !cell.bookable) throw new VtError('GONE', 'Tiden er desværre lige blevet taget.');
+      if (!cell || !cell.bookable) throw new VtError('GONE', 'Tiden er ikke længere ledig her.');
       return parseMachineGroup(await postback(cal, 'BookPass' + cellId, cellId));
     } catch (e) {
       if (!retry || e.code === 'LOGIN' || e.code === 'GONE') throw e;
@@ -334,20 +343,51 @@
     const p = await clickByName(mg.page, name);
     const t = texts(p.doc).join(' ');
     if (!/Bestilling OK/i.test(t)) throw new VtError('BOOK', pageMessage(p.doc) || 'Bookingen gik ikke igennem');
-    const machine = (/Du har bestilt\s+(\S+(?:\s\d+)?)/i.exec(t) || [])[1];
     const left = (/Du har (\d+) bestillinger tilbage/i.exec(t) || [])[1];
-    return { machine: machine || '', left: left != null ? +left : null };
+    return { left: left != null ? +left : null };
   }
 
-  async function cancelBooking(b) {
-    const main = await openTerminal(b.term);
-    const row = parseBookings(main).find((x) => x.key === b.key);
-    if (!row) throw new VtError('GONE', 'Bookingen findes ikke længere');
-    const el = main.doc.getElementsByName(row.id)[0] || main.doc.querySelector(`a[href*="${row.id}"]`);
-    const p = await activate(main, el);
-    const after = parseBookings(p);
-    if (after.some((x) => x.key === b.key)) throw new VtError('CANCEL', pageMessage(p.doc) || 'Afbestillingen gik ikke igennem');
-    return after;
+  // Booker flere maskiner i samme tidsrum, én ad gangen. Returnerer hvad der lykkedes og evt. fejl.
+  async function bookMachines(term, week, cellId, labels, first, onProgress) {
+    const done = [];
+    let mg = first;
+    let left = null;
+    for (const label of labels) {
+      onProgress(done.length + 1, labels.length);
+      try {
+        if (!mg) mg = await startBooking(term, week, cellId);
+        const opt = mg.options.find((o) => o.label === label && !o.disabled);
+        if (!opt) throw new VtError('BOOK', `${label} er ikke længere ledig.`);
+        left = (await confirmBooking(mg, opt.name)).left;
+        done.push(label);
+      } catch (e) {
+        return { done, left, error: e };
+      } finally {
+        mg = null;
+      }
+    }
+    return { done, left, error: null };
+  }
+
+  // Afbestiller flere bookinger i samme vaskeri. Returnerer vaskeriets bookinger bagefter.
+  async function cancelMany(term, keys) {
+    let page = await openTerminal(term);
+    const failed = [];
+    for (const key of keys) {
+      const row = parseBookings(page).find((x) => x.key === key);
+      if (!row) continue; // allerede væk
+      const el = page.doc.getElementsByName(row.id)[0] || page.doc.querySelector(`a[href*="${row.id}"]`);
+      try {
+        page = await activate(page, el);
+        if (parseBookings(page).some((x) => x.key === key)) failed.push(key);
+      } catch (e) {
+        failed.push(key);
+        if (e.code === 'LOGIN') throw e;
+        page = await openTerminal(term);
+      }
+    }
+    ctx = { term, page: 'main' };
+    return { after: parseBookings(page), failed };
   }
 
   // --- Status ---
@@ -380,6 +420,7 @@
       const sel = await selector();
       const t = parseTerminals(sel)[0];
       base = await postback(sel, t.pb.target, t.pb.arg);
+      sessTerm = t.name;
     }
     return parseStatus(await postback(base, 'ctl00$LinkStatus'));
   }
@@ -392,11 +433,17 @@
     const d = new Date();
     return new Date(d.getFullYear(), d.getMonth(), d.getDate() + offset).getTime();
   }
+  const weekOf = (ts) => (ts >= dayTs(7) ? 1 : 0);
+  const shortName = (n) => String(n || '').replace(/\s+\d.*$/, '');
+  // Status-siden staver nogle navne lidt anderledes (fx "Sokkellundsvej"), så sammenlign løst.
+  const norm = (s) => shortName(s).toLowerCase().replace(/[^a-zæøå]/g, '').replace(/(.)\1+/g, '$1');
+  const sameLaundry = (a, b) => !!a && !!b && norm(a) === norm(b);
 
   const S = {
-    view: 'loading', // loading | login | pick | app
-    tab: store.get('tab2', 'book'), // book | status
-    fav: store.get('fav', null), // vaskeriets navn eller ALL
+    view: 'loading', // loading | login | app
+    tab: store.get('tab3', 'book'), // book | status
+    order: store.get('order', null), // vaskerinavne i prioriteret rækkefølge
+    count: store.get('count', 2), // antal maskiner man plejer at booke
     day: null, // valgt dag (timestamp)
     terms: store.get('terms', []),
     cal: store.get('cal', {}), // "navn|uge" -> {days, cells, at}
@@ -411,7 +458,7 @@
     toast: '',
   };
 
-  // Gammel cache fra en anden dag giver forkerte datoer – smid den væk.
+  // Kalendere fra en tidligere dag har forskudte datoer – smid dem væk.
   for (const [k, c] of Object.entries(S.cal)) if (!c || !c.days || c.days[0] < dayTs(k.endsWith('|1') ? 7 : 0) - 864e5) delete S.cal[k];
 
   function saveCache() {
@@ -422,14 +469,28 @@
     store.set('status', S.status);
   }
 
-  function bookings() {
-    const all = Object.values(S.bookMap).flat();
-    return all.sort((a, b) => {
-      const da = +(parseDanishDate(a.cells[0]) || 0), db = +(parseDanishDate(b.cells[0]) || 0);
-      return da - db || String(a.cells[2]).localeCompare(String(b.cells[2]));
-    });
+  // Vaskerier i brugerens rækkefølge (nye/ukendte til sidst).
+  function ordered() {
+    const order = S.order || DEFAULT_ORDER;
+    const rank = (t) => { const i = order.findIndex((o) => sameLaundry(o, t)); return i < 0 ? 99 : i; };
+    return [...S.terms].sort((a, b) => rank(a) - rank(b));
   }
-  const targets = () => (S.fav === ALL ? S.terms : [S.fav]).filter(Boolean);
+
+  function bookingDate(b) { const d = parseDanishDate(b.cells[0]); return d ? +d : null; }
+
+  // Bookinger samlet pr. dag+tid+vaskeri: [{day, from, to, term, items:[booking]}]
+  function bookingGroups() {
+    const map = new Map();
+    for (const b of Object.values(S.bookMap).flat()) {
+      const day = bookingDate(b);
+      const k = `${day}|${b.cells[2]}|${b.term}`;
+      if (!map.has(k)) map.set(k, { day, from: b.cells[2], to: b.cells[3], term: b.term, items: [] });
+      map.get(k).items.push(b);
+    }
+    const groups = [...map.values()];
+    groups.forEach((g) => g.items.sort((a, b) => String(a.cells[1]).localeCompare(String(b.cells[1]), 'da', { numeric: true })));
+    return groups.sort((a, b) => (a.day || 0) - (b.day || 0) || String(a.from).localeCompare(String(b.from)));
+  }
 
   function handleError(e, field = 'error') {
     if (e.code === 'LOGIN' && !creds()) {
@@ -468,13 +529,6 @@
     }));
   }
 
-  function loadBookingsFor(term) {
-    return serial(() => withSession(async () => {
-      S.bookMap[term] = parseBookings(await openTerminal(term)).map((b) => ({ ...b, term }));
-      render();
-    }));
-  }
-
   let refreshing = null;
   function refresh() {
     if (refreshing) return refreshing;
@@ -484,11 +538,10 @@
     refreshing = (async () => {
       try {
         await loadTerms();
-        if (S.fav !== ALL && !S.terms.includes(S.fav)) { S.view = 'pick'; return; }
-        const t = targets();
-        for (const term of t) await loadCalendar(term, 0);
-        if (S.fav !== ALL) await loadCalendar(S.fav, 1);
-        for (const term of S.terms.filter((x) => !t.includes(x))) await loadBookingsFor(term);
+        for (const term of ordered()) {
+          await loadCalendar(term, 0);
+          await loadCalendar(term, 1);
+        }
         S.bookingsAt = Date.now();
         saveCache();
       } catch (e) {
@@ -500,23 +553,6 @@
       }
     })();
     return refreshing;
-  }
-
-  // Henter næste uge for "alle vaskerier", når man vælger en dag i den.
-  async function ensureWeek(week) {
-    const missing = targets().filter((t) => !S.cal[t + '|' + week]);
-    if (!missing.length) return;
-    S.loading = true;
-    render();
-    try {
-      for (const t of missing) await loadCalendar(t, week);
-      saveCache();
-    } catch (e) {
-      handleError(e);
-    } finally {
-      S.loading = !!refreshing;
-      render();
-    }
   }
 
   async function refreshStatus() {
@@ -546,41 +582,124 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Tidsrum for en dag
+  // ---------------------------------------------------------------------------
+
+  // [{from, to, week, items:[{term, cell}] (i prioriteret rækkefølge), own: bookingGroup|null}]
+  function slotsFor(ts) {
+    const week = weekOf(ts);
+    const now = Date.now();
+    const map = new Map();
+    for (const term of ordered()) {
+      const c = S.cal[term + '|' + week];
+      if (!c) continue;
+      const d = c.days.indexOf(ts);
+      if (d < 0) continue;
+      for (const cell of c.cells.filter((x) => x.d === d)) {
+        const [h, m] = (cell.to || '23:59').split(':').map(Number);
+        if (new Date(ts).setHours(h, m) < now) continue; // forbi
+        const k = cell.from + '–' + cell.to;
+        if (!map.has(k)) map.set(k, { from: cell.from, to: cell.to, week, items: [], own: [] });
+        map.get(k).items.push({ term, cell });
+      }
+    }
+    const groups = bookingGroups().filter((g) => g.day === ts);
+    for (const s of map.values()) s.own = groups.filter((g) => g.from === s.from);
+    return [...map.values()].sort((a, b) => a.from.localeCompare(b.from));
+  }
+  const loadedDay = (ts) => ordered().some((t) => S.cal[t + '|' + weekOf(ts)]);
+  const freeSlots = (ts) => slotsFor(ts).filter((s) => s.items.some((i) => i.cell.bookable)).length;
+
+  // ---------------------------------------------------------------------------
   // Handlinger
   // ---------------------------------------------------------------------------
 
-  function openBooking(term, week, cellId) {
-    const c = S.cal[term + '|' + week];
-    const cell = c && c.cells.find((x) => x.id === cellId);
-    if (!cell) return;
-    S.sheet = {
-      kind: 'book', phase: 'loading', waiting: running, term, week, cellId,
-      day: c.days[cell.d], from: cell.from, to: cell.to,
-    };
+  // Åbner bookingvinduet for et tidsrum og undersøger det første vaskeri (i din rækkefølge) med plads.
+  function openBooking(fromKey, ts) {
+    const slot = slotsFor(ts).find((s) => s.from === fromKey);
+    if (!slot) return;
+    const cands = slot.items.filter((i) => i.cell.bookable).map((i) => ({ term: i.term, cellId: i.cell.id }));
+    if (!cands.length) return;
+    S.sheet = { kind: 'book', phase: 'choose', day: ts, from: slot.from, to: slot.to, week: slot.week, cands, idx: 0, probes: {}, sel: [] };
     render();
-    serial(() => {
-      if (S.sheet) { S.sheet.waiting = false; render(); }
-      return withSession(() => startBooking(term, week, cellId));
-    }, true)
-      .then((mg) => { if (S.sheet && S.sheet.cellId === cellId) { S.sheet = { ...S.sheet, phase: 'choose', mg }; render(); } })
-      .catch((e) => {
-        if (e.code === 'LOGIN' && !creds()) { S.sheet = null; handleError(e); return; }
-        if (S.sheet) { S.sheet = { ...S.sheet, phase: 'error', msg: e.message }; render(); }
-      });
+    probe(0);
   }
 
-  function chooseMachine(name) {
+  function probe(idx) {
     const sh = S.sheet;
-    if (!sh || !sh.mg || sh.phase !== 'choose') return;
-    S.sheet = { ...sh, phase: 'booking' };
+    if (!sh || sh.kind !== 'book') return;
+    sh.idx = idx;
+    const c = sh.cands[idx];
+    const p = sh.probes[c.term];
+    if (p && p.state === 'ok') { preselect(); render(); return; }
+    sh.probes[c.term] = { state: 'loading', waiting: running };
     render();
-    serial(() => confirmBooking(sh.mg, name), true)
-      .then((res) => {
-        S.sheet = { ...S.sheet, phase: 'done', machine: res.machine, left: res.left };
-        render();
-        loadCalendar(sh.term, sh.week).then(saveCache, () => {});
-      })
-      .catch((e) => { S.sheet = { ...S.sheet, phase: 'error', msg: e.message }; render(); });
+    serial(() => {
+      if (S.sheet === sh) { sh.probes[c.term].waiting = false; render(); }
+      return withSession(() => startBooking(c.term, sh.week, c.cellId));
+    }, true).then((mg) => {
+      if (S.sheet !== sh) return;
+      sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
+      sh.lastProbe = c.term; // serveren står nu på dette vaskeris maskinvalg
+      if (sh.idx === idx) preselect();
+      render();
+    }, (e) => {
+      if (S.sheet !== sh) return;
+      if (e.code === 'LOGIN' && !creds()) { S.sheet = null; handleError(e); return; }
+      sh.probes[c.term] = { state: 'error', msg: e.message };
+      render();
+    });
+  }
+
+  function freeLabels(mg) { return mg.options.filter((o) => !o.disabled).map((o) => o.label); }
+
+  function preselect() {
+    const sh = S.sheet;
+    const p = sh.probes[sh.cands[sh.idx].term];
+    if (!p || p.state !== 'ok') { sh.sel = []; return; }
+    sh.sel = freeLabels(p.mg).slice(0, S.count);
+  }
+
+  function toggleMachine(label) {
+    const sh = S.sheet;
+    if (!sh || sh.phase !== 'choose') return;
+    sh.sel = sh.sel.includes(label) ? sh.sel.filter((x) => x !== label) : [...sh.sel, label];
+    render();
+  }
+
+  function setCount(n) {
+    S.count = Math.max(1, Math.min(8, n));
+    store.set('count', S.count);
+    if (S.sheet && S.sheet.kind === 'book' && S.sheet.phase === 'choose') preselect();
+    render();
+  }
+
+  function doBook() {
+    const sh = S.sheet;
+    if (!sh || sh.phase !== 'choose' || !sh.sel.length) return;
+    const c = sh.cands[sh.idx];
+    const p = sh.probes[c.term];
+    if (!p || p.state !== 'ok') return;
+    const labels = freeLabels(p.mg).filter((l) => sh.sel.includes(l)); // i maskinrækkefølge
+    sh.phase = 'booking';
+    sh.term = c.term;
+    sh.progress = `Booker ${labels[0]}…`;
+    render();
+    // Maskinvalgs-siden er kun gyldig, hvis serveren ikke har flyttet sig siden (gælder kun det senest undersøgte vaskeri).
+    const fresh = sh.lastProbe === c.term ? p.mg : null;
+    serial(() => bookMachines(c.term, sh.week, c.cellId, labels, fresh, (i, n) => {
+      sh.progress = n > 1 ? `Booker maskine ${i} af ${n}…` : 'Booker…';
+      render();
+    }), true).then((res) => {
+      sh.phase = 'done';
+      sh.result = res;
+      render();
+      loadCalendar(c.term, sh.week).then(saveCache, () => {});
+    }, (e) => {
+      sh.phase = 'done';
+      sh.result = { done: [], left: null, error: e };
+      render();
+    });
   }
 
   function closeSheet() {
@@ -589,29 +708,51 @@
     pump();
   }
 
-  function askCancel(key) {
-    const b = bookings().find((x) => x.key === key);
-    if (b) { S.sheet = { kind: 'cancel', phase: 'confirm', b }; render(); }
+  function askCancel(gi) {
+    const g = bookingGroups()[gi];
+    if (g) { S.sheet = { kind: 'cancel', phase: 'confirm', g, sel: g.items.map((b) => b.key) }; render(); }
+  }
+
+  function toggleCancel(key) {
+    const sh = S.sheet;
+    if (!sh || sh.kind !== 'cancel' || sh.phase !== 'confirm') return;
+    sh.sel = sh.sel.includes(key) ? sh.sel.filter((k) => k !== key) : [...sh.sel, key];
+    render();
   }
 
   function doCancel() {
     const sh = S.sheet;
-    if (!sh || sh.kind !== 'cancel') return;
-    S.sheet = { ...sh, phase: 'cancelling' };
+    if (!sh || sh.kind !== 'cancel' || !sh.sel.length) return;
+    sh.phase = 'cancelling';
     render();
-    serial(() => withSession(() => cancelBooking(sh.b)), true)
-      .then((after) => {
-        S.bookMap[sh.b.term] = after.map((x) => ({ ...x, term: sh.b.term }));
-        S.sheet = null;
-        toast('Vasketiden er afbestilt');
+    serial(() => withSession(() => cancelMany(sh.g.term, sh.sel)), true)
+      .then(({ after, failed }) => {
+        S.bookMap[sh.g.term] = after.map((x) => ({ ...x, term: sh.g.term }));
         saveCache();
+        if (failed.length) {
+          S.sheet = { ...sh, phase: 'error', msg: `${failed.length} af ${sh.sel.length} kunne ikke afbestilles. Prøv igen.` };
+        } else {
+          S.sheet = null;
+          toast(sh.sel.length > 1 ? `${sh.sel.length} maskiner afbestilt` : 'Afbestilt');
+        }
         render();
-        loadCalendar(sh.b.term, 0).then(saveCache, () => {});
+        loadCalendar(sh.g.term, weekOf(sh.g.day || 0)).then(saveCache, () => {});
       }, (e) => {
         if (e.code === 'LOGIN' && !creds()) { S.sheet = null; handleError(e); return; }
-        S.sheet = { ...S.sheet, phase: 'error', msg: e.message };
+        S.sheet = { ...sh, phase: 'error', msg: e.message };
         render();
       });
+  }
+
+  function moveOrder(term, dir) {
+    const list = ordered();
+    const i = list.indexOf(term);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    S.order = list.map(shortName);
+    store.set('order', S.order);
+    render();
   }
 
   function doLogin(form) {
@@ -631,25 +772,14 @@
 
   function doForget() {
     store.del('creds');
+    S.sheet = null;
     toast('Login glemt på denne telefon');
     render();
-  }
-
-  function setFav(name) {
-    S.fav = name;
-    store.set('fav', name);
-    S.day = null;
-    S.view = 'app';
-    render();
-    refresh();
   }
 
   function selectDay(ts) {
     S.day = ts;
     render();
-    if (ts >= dayTs(7)) ensureWeek(1);
-    const strip = root.querySelector('.days .on');
-    if (strip) strip.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
   }
 
   let toastTimer;
@@ -660,12 +790,6 @@
   }
 
   function startApp() {
-    if (!S.fav) {
-      S.view = 'pick';
-      render();
-      loadTerms().then(render, handleError);
-      return;
-    }
     S.view = 'app';
     render();
     refresh();
@@ -677,123 +801,91 @@
   // ---------------------------------------------------------------------------
 
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const shortName = (n) => String(n || '').replace(/\s+\d.*$/, '');
   const hhmm = (ts) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
   const shortTime = (t) => String(t || '').replace(/:00$/, '');
+  const span = (from, to) => `${shortTime(from)}–${shortTime(to)}`;
   function dayName(ts, long) {
-    const d = new Date(ts);
     const diff = Math.round((ts - dayTs(0)) / 864e5);
     if (diff === 0) return 'I dag';
     if (diff === 1) return 'I morgen';
-    return long ? cap(['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'][d.getDay()]) : cap(WEEKDAYS[d.getDay()]);
+    const d = new Date(ts);
+    return cap((long ? WEEKDAYS_LONG : WEEKDAYS)[d.getDay()]);
   }
   const dateLabel = (ts) => { const d = new Date(ts); return `${d.getDate()}/${d.getMonth() + 1}`; };
+  const fullDay = (ts) => (ts == null ? '' : `${dayName(ts, true)} ${dateLabel(ts)}`);
   const ago = (ts) => {
     if (!ts) return '';
     const m = Math.round((Date.now() - ts) / 60000);
     return m < 1 ? 'lige nu' : m < 60 ? `for ${m} min siden` : `kl. ${hhmm(ts)}`;
   };
-
-  // Alle tider for en dag på tværs af de valgte vaskerier: [{from,to,items:[{term,cell,week}]}]
-  function slotsFor(ts) {
-    const week = ts >= dayTs(7) ? 1 : 0;
-    const now = Date.now();
-    const map = new Map();
-    for (const term of targets()) {
-      const c = S.cal[term + '|' + week];
-      if (!c) continue;
-      const d = c.days.indexOf(ts);
-      if (d < 0) continue;
-      for (const cell of c.cells.filter((x) => x.d === d)) {
-        const [h, m] = (cell.to || '23:59').split(':').map(Number);
-        if (new Date(ts).setHours(h, m) < now) continue; // forbi
-        const k = cell.from + '–' + cell.to;
-        if (!map.has(k)) map.set(k, { from: cell.from, to: cell.to, items: [] });
-        map.get(k).items.push({ term, cell, week });
-      }
-    }
-    return [...map.values()].sort((a, b) => a.from.localeCompare(b.from));
-  }
-  const freeCount = (ts) => slotsFor(ts).reduce((n, s) => n + s.items.filter((i) => i.cell.bookable).length, 0);
-  const loaded = (ts) => targets().some((t) => S.cal[t + '|' + (ts >= dayTs(7) ? 1 : 0)]);
+  const machineList = (labels) => {
+    const nums = labels.map((l) => (/(\d+)/.exec(l) || [])[1]);
+    if (labels.length > 1 && nums.every(Boolean) && labels.every((l) => /^Vask/i.test(l))) return `Vask ${nums.join(', ')}`;
+    return labels.join(', ');
+  };
 
   function renderBookings() {
-    const list = bookings();
-    if (!list.length) {
-      return S.bookingsAt ? '<p class="muted small">Du har ingen vasketider booket.</p>' : '';
-    }
-    return list.map((b) => {
-      const [date, machine, from, to] = b.cells;
-      const d = parseDanishDate(date);
-      const when = d ? `${dayName(+d, true)} ${dateLabel(+d)}` : date;
-      return `<div class="mybook">
+    const groups = bookingGroups();
+    if (!groups.length) return S.bookingsAt ? '<p class="muted small">Du har ingen vasketider booket.</p>' : '';
+    return groups.map((g, i) => `<div class="mybook">
         <div class="mb-main">
-          <div class="mb-when">${esc(when)} · ${esc(shortTime(from))}–${esc(shortTime(to))}</div>
-          <div class="mb-sub">${esc(machine || '')} · ${esc(shortName(b.term))}</div>
+          <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
+          <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</div>
         </div>
-        <button class="btn-ghost danger" data-act="cancel" data-key="${esc(b.key)}">Afbestil</button>
-      </div>`;
-    }).join('');
+        <button class="btn-ghost danger" data-act="cancel" data-i="${i}">Afbestil</button>
+      </div>`).join('');
   }
 
   function renderBook() {
     const days = Array.from({ length: 14 }, (_, i) => dayTs(i));
-    // Indtil man selv vælger en dag, vises den første dag med ledige tider.
-    const day = S.day != null && days.includes(S.day) ? S.day : (days.find((ts) => loaded(ts) && freeCount(ts) > 0) || days[0]);
+    const day = S.day != null && days.includes(S.day) ? S.day : (days.find((ts) => loadedDay(ts) && freeSlots(ts) > 0) || days[0]);
+    const ownDays = new Set(bookingGroups().map((g) => g.day));
     const strip = days.map((ts) => {
-      const n = loaded(ts) ? freeCount(ts) : null;
+      const n = loadedDay(ts) ? freeSlots(ts) : null;
       const d = new Date(ts);
       const top = Math.round((ts - dayTs(0)) / 864e5) === 0 ? 'I dag' : cap(WEEKDAYS[d.getDay()]);
       return `<button class="dayb ${ts === day ? 'on' : ''} ${n === 0 ? 'full' : ''}" data-act="day" data-ts="${ts}">
+        ${ownDays.has(ts) ? '<span class="d-dot" title="Du har en tid"></span>' : ''}
         <span class="d-top">${esc(top)}</span><span class="d-num">${d.getDate()}</span>
-        <span class="d-free">${n == null ? '·' : n === 0 ? 'fuldt' : `${n} ledig${n === 1 ? '' : 'e'}`}</span></button>`;
+        <span class="d-free">${n == null ? '·' : n === 0 ? 'fuldt' : `${n} tid${n === 1 ? '' : 'er'}`}</span></button>`;
     }).join('');
 
     const slots = slotsFor(day);
-    // Dine egne bookinger: tidsrummet kan stadig stå som ledigt (andre maskiner er fri), så de markeres for sig.
-    const mine = new Map();
-    for (const b of bookings()) {
-      const d = parseDanishDate(b.cells[0]);
-      if (d && +d === day) mine.set(b.term + '|' + b.cells[2], b);
-    }
     let list;
-    if (!loaded(day)) {
-      list = `<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`;
+    if (!loadedDay(day)) {
+      list = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     } else if (!slots.length) {
       list = `<p class="empty">Ikke flere tider ${day === dayTs(0) ? 'i dag' : 'denne dag'}.</p>`;
-    } else if (S.fav !== ALL) {
-      list = slots.map((s) => {
-        const it = s.items[0];
-        const t = `<span class="s-time">${esc(shortTime(s.from))}<small>–${esc(shortTime(s.to))}</small></span>`;
-        const own = mine.get(it.term + '|' + s.from);
-        if (own) return `<div class="slot mine">${t}<span class="s-state">Din tid · ${esc(own.cells[1] || '')}</span><span class="s-ok">✓</span></div>`;
-        return it.cell.bookable
-          ? `<button class="slot free" data-act="book" data-term="${esc(it.term)}" data-week="${it.week}" data-cell="${esc(it.cell.id)}">${t}<span class="s-state">Ledig</span><span class="s-cta">Book</span></button>`
-          : `<div class="slot taken">${t}<span class="s-state">Optaget</span></div>`;
-      }).join('');
     } else {
+      const top = ordered()[0];
       list = slots.map((s) => {
-        const own = s.items.map((i) => mine.get(i.term + '|' + s.from)).find(Boolean);
-        const free = own ? [] : s.items.filter((i) => i.cell.bookable);
         const t = `<span class="s-time">${esc(shortTime(s.from))}<small>–${esc(shortTime(s.to))}</small></span>`;
-        if (own) return `<div class="slot mine">${t}<span class="s-state">Din tid · ${esc(own.cells[1] || '')} · ${esc(shortName(own.term))}</span><span class="s-ok">✓</span></div>`;
-        const chips = free.length
-          ? free.map((i) => `<button class="chip" data-act="book" data-term="${esc(i.term)}" data-week="${i.week}" data-cell="${esc(i.cell.id)}">${esc(shortName(i.term))}</button>`).join('')
-          : '<span class="s-state">Alt optaget</span>';
-        return `<div class="slot multi ${free.length ? '' : 'taken'}">${t}<div class="chips">${chips}</div></div>`;
+        if (s.own.length) {
+          const g = s.own[0];
+          return `<div class="slot mine">${t}<span class="s-main"><b>Din tid</b><small>${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</small></span><span class="s-ok">✓</span></div>`;
+        }
+        const free = s.items.filter((i) => i.cell.bookable);
+        if (!free.length) return `<div class="slot taken">${t}<span class="s-main">Alt optaget</span></div>`;
+        const best = free[0].term;
+        const others = free.slice(1).map((i) => shortName(i.term));
+        const sub = best === top
+          ? (others.length ? `Også: ${others.join(', ')}` : 'Kun ledig her')
+          : `${shortName(top)} er optaget${others.length ? ` · også: ${others.join(', ')}` : ''}`;
+        return `<button class="slot free ${best === top ? '' : 'alt'}" data-act="book" data-from="${esc(s.from)}" data-ts="${day}">${t}
+          <span class="s-main"><b>${esc(shortName(best))}</b><small>${esc(sub)}</small></span><span class="s-cta">Book</span></button>`;
       }).join('');
     }
 
-    const c = targets().map((t) => S.cal[t + '|0']).filter(Boolean);
+    const c = S.terms.map((t) => S.cal[t + '|0']).filter(Boolean);
     const updated = c.length ? `Opdateret ${ago(Math.min(...c.map((x) => x.at)))}` : '';
-    const myList = renderBookings();
+    const mine = renderBookings();
     return `
-      ${myList ? `<section class="block"><h2>Dine vasketider</h2>${myList}</section>` : ''}
+      ${mine ? `<section class="block"><h2>Dine vasketider</h2>${mine}</section>` : ''}
       <section class="block">
-        <h2>Book en tid</h2>
+        <h2>Book vask</h2>
         <div class="days">${strip}</div>
-        <div class="dayhead">${esc(dayName(day, true))} ${esc(dateLabel(day))}<span class="muted small">${esc(updated)}</span></div>
+        <div class="dayhead">${esc(fullDay(day))}<span class="muted small">${esc(updated)}</span></div>
         <div class="slots">${list}</div>
       </section>`;
   }
@@ -807,37 +899,25 @@
 
   function renderStatus() {
     let html = '';
-    if (S.statusBusy) html += `<div class="note">${esc(S.statusBusy)}</div>`;
+    if (S.statusBusy) html += `<div class="note"><span class="spinner"></span>${esc(S.statusBusy)}</div>`;
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
-      const ls = [...S.status.laundries].sort((a, b) => (sameLaundry(b.name, S.fav) ? 1 : 0) - (sameLaundry(a.name, S.fav) ? 1 : 0));
-      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}. Viser kun om maskinen er ledig eller reserveret – restid vises, hvis vasketur.dk sender den.</p>`;
+      const order = ordered();
+      const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 99 : i; };
+      const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
+      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}. vasketur.dk viser lige nu kun ledig/reserveret – restid kommer frem her, hvis den bliver sendt igen.</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
           const free = g.machines.filter((m) => stateClass(m.state) === 'ok').length;
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige</span></div>
             <div class="machines">${g.machines.map((m) => `<div class="mach ${stateClass(m.state)}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(m.state)}</div></div>`).join('')}</div></div>`;
         }).join('');
-        html += `<section class="block card ${sameLaundry(L.name, S.fav) ? 'fav' : ''}"><h2>${esc(L.name)}${sameLaundry(L.name, S.fav) ? ' <span class="tag">Dit vaskeri</span>' : ''}</h2>${groups}</section>`;
+        html += `<section class="block card"><h2>${esc(L.name)}</h2>${groups}</section>`;
       }
     } else if (!S.statusBusy && !S.statusError) {
-      html += `<p class="empty">Henter status…</p>`;
+      html += '<p class="empty">Henter status…</p>';
     }
     return html;
-  }
-  // Status-siden staver nogle navne lidt anderledes (fx "Sokkellundsvej"), så sammenlign løst.
-  function sameLaundry(a, b) {
-    if (!a || !b || b === ALL) return false;
-    const norm = (s) => s.toLowerCase().replace(/[^a-zæøå0-9]/g, '').replace(/(.)\1+/g, '$1');
-    return norm(a) === norm(b);
-  }
-
-  function renderPick() {
-    const list = S.terms.length
-      ? S.terms.map((t) => `<button class="pick" data-act="fav" data-term="${esc(t)}">${esc(t)}</button>`).join('') +
-        `<button class="pick alt" data-act="fav" data-term="${ALL}">Jeg bruger flere vaskerier</button>`
-      : `<div class="skeleton"></div><div class="skeleton"></div>`;
-    return `<section class="block"><h2>Hvilket vaskeri bruger du?</h2><p class="muted">Så viser appen dine tider der. Du kan altid skifte øverst.</p>${list}</section>`;
   }
 
   function renderLogin() {
@@ -856,42 +936,88 @@
     </section>`;
   }
 
+  function renderBookSheet(sh) {
+    let h = `<div class="sh-title">${esc(fullDay(sh.day))} kl. ${esc(span(sh.from, sh.to))}</div>`;
+    if (sh.phase === 'choose') {
+      // Vaskeri-valg (kun dem med plads, i din rækkefølge)
+      h += `<div class="seg-l">${sh.cands.map((c, i) => `<button class="${i === sh.idx ? 'on' : ''}" data-act="probe" data-i="${i}">${esc(shortName(c.term))}</button>`).join('')}</div>`;
+      const c = sh.cands[sh.idx];
+      const p = sh.probes[c.term] || {};
+      if (p.state === 'loading') {
+        h += `<div class="sh-wait"><span class="spinner"></span>${p.waiting ? 'Venter på, at appen bliver færdig med at hente…' : `Ser hvilke maskiner der er ledige på ${esc(shortName(c.term))}…`}</div>`;
+      } else if (p.state === 'error') {
+        h += `<div class="alert">${esc(p.msg)}</div>`;
+        if (sh.idx + 1 < sh.cands.length) h += `<button class="btn-ghost wide" data-act="probe" data-i="${sh.idx + 1}">Prøv ${esc(shortName(sh.cands[sh.idx + 1].term))}</button>`;
+      } else if (p.state === 'ok') {
+        const free = freeLabels(p.mg);
+        h += `<div class="countrow"><span>Antal maskiner</span><span class="stepper"><button data-act="count" data-d="-1" aria-label="Færre">−</button><b>${S.count}</b><button data-act="count" data-d="1" aria-label="Flere">+</button></span></div>`;
+        h += `<div class="mgrid">${p.mg.options.map((o) => {
+          const on = sh.sel.includes(o.label);
+          return `<button class="mbtn ${on ? 'on' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
+        }).join('')}</div>`;
+        if (free.length < S.count) {
+          const next = sh.cands[sh.idx + 1];
+          h += `<div class="hint">Kun ${free.length} ledig${free.length === 1 ? '' : 'e'} her.${next ? ` <button class="btn-inline" data-act="probe" data-i="${sh.idx + 1}">Se ${esc(shortName(next.term))}</button>` : ''}</div>`;
+        }
+        const n = sh.sel.length;
+        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? sh.sel[0] : `${n} maskiner`} på ${esc(shortName(c.term))}` : 'Vælg mindst én maskine'}</button>`;
+        if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere i alt.</div>`;
+      }
+      h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
+    } else if (sh.phase === 'booking') {
+      h += `<div class="sh-wait"><span class="spinner"></span>${esc(sh.progress || 'Booker…')}</div>`;
+    } else if (sh.phase === 'done') {
+      const r = sh.result;
+      if (r.done.length) {
+        h += `<div class="success"><div class="big-check">✓</div>Booket på ${esc(shortName(sh.term))}:<br>${esc(machineList(r.done))}</div>`;
+      }
+      if (r.error) h += `<div class="alert">${r.done.length ? 'Resten gik ikke igennem: ' : ''}${esc(r.error.message)}</div>`;
+      if (r.left != null) h += `<div class="muted small center">Du kan booke ${r.left} maskine${r.left === 1 ? '' : 'r'} mere i alt.</div>`;
+      h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
+    }
+    return h;
+  }
+
+  function renderCancelSheet(sh) {
+    const g = sh.g;
+    let h = `<div class="sh-title">Afbestil vasketid?</div><div class="muted">${esc(fullDay(g.day))} kl. ${esc(span(g.from, g.to))} · ${esc(shortName(g.term))}</div>`;
+    if (sh.phase === 'confirm') {
+      if (g.items.length > 1) {
+        h += `<div class="mgrid">${g.items.map((b) => {
+          const on = sh.sel.includes(b.key);
+          return `<button class="mbtn danger ${on ? 'on' : ''}" data-act="toggle-cancel" data-key="${esc(b.key)}">${esc(b.cells[1])}<small>${on ? 'afbestilles' : 'beholdes'}</small></button>`;
+        }).join('')}</div>`;
+      }
+      const n = sh.sel.length;
+      h += `<button class="btn-danger big" data-act="do-cancel" ${n ? '' : 'disabled'}>${n === g.items.length ? (n > 1 ? `Ja, afbestil alle ${n}` : 'Ja, afbestil') : `Afbestil ${n} maskine${n === 1 ? '' : 'r'}`}</button>`;
+      h += '<button class="btn-link" data-act="close-sheet">Nej, behold</button>';
+    } else if (sh.phase === 'cancelling') {
+      h += '<div class="sh-wait"><span class="spinner"></span>Afbestiller…</div>';
+    } else if (sh.phase === 'error') {
+      h += `<div class="alert">${esc(sh.msg)}</div><button class="btn-primary" data-act="close-sheet">OK</button>`;
+    }
+    return h;
+  }
+
+  function renderSettingsSheet() {
+    const list = ordered();
+    let h = '<div class="sh-title">Indstillinger</div><p class="muted small">Rækkefølge: appen foreslår altid det øverste vaskeri med plads.</p>';
+    h += `<div class="order">${list.map((t, i) => `<div class="o-row"><span class="o-n">${i + 1}</span><span class="o-name">${esc(t)}</span>
+      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Flyt op">↑</button>
+      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="1" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Flyt ned">↓</button></div>`).join('')}</div>`;
+    h += `<div class="countrow"><span>Antal maskiner jeg plejer at booke</span><span class="stepper"><button data-act="count" data-d="-1">−</button><b>${S.count}</b><button data-act="count" data-d="1">+</button></span></div>`;
+    h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
+    h += '<div class="sh-foot"><button class="btn-link small" data-act="original">Åbn den gamle side</button>';
+    if (creds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
+    h += '</div>';
+    return h;
+  }
+
   function renderSheet() {
     const sh = S.sheet;
     if (!sh) return '';
-    let inner = '';
-    let canClose = true;
-    if (sh.kind === 'book') {
-      inner += `<div class="sh-title">${esc(dayName(sh.day, true))} ${esc(dateLabel(sh.day))} kl. ${esc(shortTime(sh.from))}–${esc(shortTime(sh.to))}</div>
-        <div class="muted">${esc(sh.term)}</div>`;
-      if (sh.phase === 'loading') inner += `<div class="sh-wait"><span class="spinner"></span>${sh.waiting ? 'Venter på, at appen bliver færdig med at hente…' : 'Gør klar…'}</div>`;
-      if (sh.phase === 'choose') {
-        const mg = sh.mg;
-        const primary = mg.random ? mg.random.name : (mg.options.find((o) => !o.disabled) || {}).name;
-        inner += `<button class="btn-primary big" data-act="machine" data-name="${esc(primary)}">Book tiden</button>`;
-        if (mg.options.length > 1) {
-          inner += `<div class="muted small center">eller vælg selv maskine</div><div class="mchoice">${mg.options.map((o) =>
-            `<button class="btn-ghost" data-act="machine" data-name="${esc(o.name)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}</button>`).join('')}</div>`;
-        }
-        if (mg.quota != null) inner += `<div class="muted small center">Du kan booke ${mg.quota} tider mere.</div>`;
-      }
-      if (sh.phase === 'booking') { canClose = false; inner += `<div class="sh-wait"><span class="spinner"></span>Booker…</div>`; }
-      if (sh.phase === 'done') {
-        inner += `<div class="success"><div class="big-check">✓</div>Du har vasketid${sh.machine ? ` på ${esc(sh.machine)}` : ''}.</div>`;
-        if (sh.left != null) inner += `<div class="muted small center">Du kan booke ${sh.left} tider mere.</div>`;
-        inner += `<button class="btn-primary" data-act="close-sheet">Færdig</button>`;
-      }
-      if (sh.phase === 'error') inner += `<div class="alert">${esc(sh.msg)}</div><button class="btn-primary" data-act="close-sheet">OK</button>`;
-      if (sh.phase === 'loading' || sh.phase === 'choose') inner += `<button class="btn-link" data-act="close-sheet">Fortryd</button>`;
-    } else if (sh.kind === 'cancel') {
-      const [date, machine, from, to] = sh.b.cells;
-      const d = parseDanishDate(date);
-      inner += `<div class="sh-title">Afbestil vasketid?</div>
-        <div class="muted">${esc(d ? `${dayName(+d, true)} ${dateLabel(+d)}` : date)} kl. ${esc(shortTime(from))}–${esc(shortTime(to))} · ${esc(machine || '')} · ${esc(shortName(sh.b.term))}</div>`;
-      if (sh.phase === 'confirm') inner += `<button class="btn-danger big" data-act="do-cancel">Ja, afbestil</button><button class="btn-link" data-act="close-sheet">Nej, behold den</button>`;
-      if (sh.phase === 'cancelling') { canClose = false; inner += `<div class="sh-wait"><span class="spinner"></span>Afbestiller…</div>`; }
-      if (sh.phase === 'error') inner += `<div class="alert">${esc(sh.msg)}</div><button class="btn-primary" data-act="close-sheet">OK</button>`;
-    }
+    const inner = sh.kind === 'book' ? renderBookSheet(sh) : sh.kind === 'cancel' ? renderCancelSheet(sh) : renderSettingsSheet();
+    const canClose = !(sh.phase === 'booking' || sh.phase === 'cancelling');
     return `<div class="backdrop" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet" role="dialog">${inner}</div>`;
   }
 
@@ -900,34 +1026,38 @@
     if (!root) return;
     const busy = running || S.loading || !!S.statusBusy;
     let main = '';
-    if (S.view === 'loading') main = `<div class="skeleton"></div><div class="skeleton"></div>`;
+    if (S.view === 'loading') main = '<div class="skeleton"></div><div class="skeleton"></div>';
     else if (S.view === 'login') main = renderLogin();
-    else if (S.view === 'pick') main = renderPick();
     else {
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       main += S.tab === 'book' ? renderBook() : renderStatus();
-      main += `<footer><button class="btn-link small" data-act="original">Åbn den gamle side</button>${creds() ? '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>' : ''}</footer>`;
     }
-    const favSelect = S.view === 'app' && S.terms.length
-      ? `<label class="favsel"><span class="sr">Vaskeri</span><select data-change="fav">${S.terms.map((t) => `<option value="${esc(t)}" ${t === S.fav ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="${ALL}" ${S.fav === ALL ? 'selected' : ''}>Alle vaskerier</option></select></label>`
-      : '';
     const scrollY = window.scrollY;
+    const daysEl = root.querySelector('.days');
+    const daysX = daysEl ? daysEl.scrollLeft : null;
     root.innerHTML = `
       <header>
-        <div class="h-row"><h1>Vasketid</h1>${favSelect}
-          ${S.view === 'app' ? `<button class="icon" data-act="refresh" aria-label="Opdatér"><span class="${busy ? 'spin' : ''}">↻</span></button>` : ''}</div>
+        <div class="h-row"><h1>Vasketid</h1>
+          ${S.view === 'app' ? `<button class="icon" data-act="refresh" aria-label="Opdatér"><span class="${busy ? 'spin' : ''}">↻</span></button>
+          <button class="icon" data-act="settings" aria-label="Indstillinger">⚙</button>` : ''}</div>
         <div class="progress ${busy ? 'on' : ''}"></div>
       </header>
       <main>${main}</main>
       ${S.view === 'app' ? `<nav>
-        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book"><span class="n-ic">📅</span>Book</button>
+        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book"><span class="n-ic">📅</span>Book vask</button>
         <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status"><span class="n-ic">🧺</span>Maskiner nu</button>
       </nav>` : ''}
       ${renderSheet()}
       ${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ''}`;
     window.scrollTo(0, scrollY);
-    const on = root.querySelector('.days .on');
-    if (on && !render.scrolled) { on.scrollIntoView({ inline: 'center', block: 'nearest' }); render.scrolled = true; }
+    const newDays = root.querySelector('.days');
+    if (newDays) {
+      if (daysX != null) newDays.scrollLeft = daysX;
+      else {
+        const on = newDays.querySelector('.on');
+        if (on) newDays.scrollLeft += on.getBoundingClientRect().left - newDays.getBoundingClientRect().left - (newDays.clientWidth - on.clientWidth) / 2;
+      }
+    }
   }
 
   function onClick(ev) {
@@ -938,7 +1068,7 @@
     switch (act) {
       case 'tab':
         S.tab = el.dataset.tab;
-        store.set('tab2', S.tab);
+        store.set('tab3', S.tab);
         window.scrollTo(0, 0);
         render();
         if (S.tab === 'status' && (!S.status || Date.now() - S.status.at > 60000)) refreshStatus();
@@ -947,23 +1077,24 @@
         if (S.tab === 'status') refreshStatus(); else refresh();
         break;
       case 'status-retry': refreshStatus(); break;
+      case 'settings': S.sheet = { kind: 'settings' }; render(); break;
       case 'day': selectDay(+el.dataset.ts); break;
-      case 'book': openBooking(el.dataset.term, +el.dataset.week, el.dataset.cell); break;
-      case 'machine': chooseMachine(el.dataset.name); break;
+      case 'book': openBooking(el.dataset.from, +el.dataset.ts); break;
+      case 'probe': probe(+el.dataset.i); break;
+      case 'machine': toggleMachine(el.dataset.label); break;
+      case 'count': setCount(S.count + +el.dataset.d); break;
+      case 'do-book': doBook(); break;
       case 'close-sheet': closeSheet(); break;
-      case 'cancel': askCancel(el.dataset.key); break;
+      case 'cancel': askCancel(+el.dataset.i); break;
+      case 'toggle-cancel': toggleCancel(el.dataset.key); break;
       case 'do-cancel': doCancel(); break;
-      case 'fav': setFav(el.dataset.term); break;
+      case 'move': moveOrder(el.dataset.term, +el.dataset.d); break;
       case 'forget': doForget(); break;
       case 'original':
         session.set('off', '1');
         location.href = BASE + 'Booking/TerminalSelector.aspx';
         break;
     }
-  }
-
-  function onChange(ev) {
-    if (ev.target.matches('select[data-change="fav"]')) setFav(ev.target.value);
   }
 
   function onSubmit(ev) {
@@ -975,21 +1106,18 @@
 
   const CSS = `
   :root{--bg:#f3f4f6;--card:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--accent:#0a66c2;--accent-fg:#fff;--soft:#e8f1fb;
-    --ok:#047857;--okbg:#d1fae5;--res:#92400e;--resbg:#fef3c7;--run:#1d4ed8;--runbg:#dbeafe;--err:#b91c1c;--errbg:#fee2e2;--shadow:0 1px 2px rgba(0,0,0,.06),0 1px 8px rgba(0,0,0,.04)}
+    --ok:#047857;--okbg:#d1fae5;--alt:#4d7c0f;--altbg:#ecfccb;--res:#92400e;--resbg:#fef3c7;--run:#1d4ed8;--runbg:#dbeafe;--err:#b91c1c;--errbg:#fee2e2;--shadow:0 1px 2px rgba(0,0,0,.06),0 1px 8px rgba(0,0,0,.04)}
   @media (prefers-color-scheme: dark){:root{--bg:#0d0f13;--card:#171a20;--fg:#eceef1;--muted:#9aa1ab;--line:#272b33;--accent:#5aa9ff;--accent-fg:#06121f;--soft:#14263b;
-    --ok:#6ee7b7;--okbg:#0d3326;--res:#fcd34d;--resbg:#3a2c0a;--run:#93c5fd;--runbg:#132a4f;--err:#fca5a5;--errbg:#3f1515;--shadow:none}}
+    --ok:#6ee7b7;--okbg:#0d3326;--alt:#bef264;--altbg:#1f2e0c;--res:#fcd34d;--resbg:#3a2c0a;--run:#93c5fd;--runbg:#132a4f;--err:#fca5a5;--errbg:#3f1515;--shadow:none}}
   html,body{margin:0!important;padding:0!important;background:var(--bg)!important}
   body>*:not(#vt-root){display:none!important}
   #vt-root{font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg);min-height:100vh;padding-bottom:calc(76px + env(safe-area-inset-bottom));-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
   #vt-root *{box-sizing:border-box}
-  #vt-root button,#vt-root select{font:inherit;color:inherit;cursor:pointer}
-  #vt-root .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  #vt-root button{font:inherit;color:inherit;cursor:pointer}
   #vt-root header{position:sticky;top:0;z-index:5;background:var(--bg)}
-  #vt-root .h-row{display:flex;align-items:center;gap:8px;padding:12px 16px 10px;max-width:640px;margin:0 auto}
-  #vt-root h1{font-size:20px;margin:0;flex:1;letter-spacing:-.01em}
-  #vt-root .favsel select{appearance:none;-webkit-appearance:none;border:1px solid var(--line);background:var(--card);border-radius:20px;padding:7px 30px 7px 12px;font-size:14px;font-weight:600;max-width:52vw;text-overflow:ellipsis;
-    background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 15px) 52%,calc(100% - 10px) 52%;background-size:5px 5px;background-repeat:no-repeat}
-  #vt-root .icon{background:none;border:0;font-size:22px;width:40px;height:40px;border-radius:20px;color:var(--muted);display:grid;place-items:center}
+  #vt-root .h-row{display:flex;align-items:center;gap:4px;padding:12px 10px 10px 16px;max-width:640px;margin:0 auto}
+  #vt-root h1{font-size:21px;margin:0;flex:1;letter-spacing:-.01em}
+  #vt-root .icon{background:none;border:0;font-size:22px;width:44px;height:44px;border-radius:22px;color:var(--muted);display:grid;place-items:center}
   #vt-root .spin{display:inline-block;animation:vtspin 1s linear infinite}
   @keyframes vtspin{to{transform:rotate(360deg)}}
   #vt-root .progress{height:2px;background:transparent;overflow:hidden}
@@ -997,39 +1125,37 @@
   @keyframes vtbar{from{background-position:-50% 0}to{background-position:150% 0}}
   #vt-root main{padding:8px 16px 16px;max-width:640px;margin:0 auto}
   #vt-root .block{margin:8px 0 22px}
-  #vt-root .block h2{font-size:15px;margin:0 0 10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  #vt-root .block h2{font-size:14px;margin:0 0 10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
   #vt-root .card{background:var(--card);border-radius:16px;padding:14px;box-shadow:var(--shadow);border:1px solid var(--line)}
   #vt-root .card h2{color:var(--fg);text-transform:none;letter-spacing:0;font-size:17px}
-  #vt-root .card.fav{border-color:var(--accent)}
-  #vt-root .tag{font-size:12px;background:var(--soft);color:var(--accent);padding:2px 8px;border-radius:10px;vertical-align:middle;font-weight:600}
   #vt-root .muted{color:var(--muted)} #vt-root .small{font-size:13px} #vt-root .center{text-align:center}
   #vt-root .empty{color:var(--muted);text-align:center;padding:28px 0}
   #vt-root .mybook{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
-  #vt-root .days{display:flex;gap:8px;overflow-x:auto;scroll-snap-type:x proximity;padding:2px 2px 10px;margin:0 -16px;padding-left:16px;padding-right:16px;scrollbar-width:none}
+  #vt-root .days{display:flex;gap:8px;overflow-x:auto;padding:4px 16px 10px;margin:0 -16px;scrollbar-width:none}
   #vt-root .days::-webkit-scrollbar{display:none}
-  #vt-root .dayb{flex:none;width:66px;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:8px 0;display:flex;flex-direction:column;align-items:center;gap:1px;scroll-snap-align:center}
+  #vt-root .dayb{position:relative;flex:none;width:64px;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:8px 0;display:flex;flex-direction:column;align-items:center;gap:1px}
   #vt-root .d-top{font-size:12px;color:var(--muted)} #vt-root .d-num{font-size:20px;font-weight:700;line-height:1.2} #vt-root .d-free{font-size:11px;color:var(--ok);font-weight:600}
+  #vt-root .d-dot{position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:4px;background:var(--accent)}
   #vt-root .dayb.full .d-free{color:var(--muted);font-weight:400}
   #vt-root .dayb.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
   #vt-root .dayb.on .d-top,#vt-root .dayb.on .d-free{color:var(--accent-fg);opacity:.9}
-  #vt-root .dayhead{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:17px;margin:4px 0 8px}
+  #vt-root .dayb.on .d-dot{background:var(--accent-fg)}
+  #vt-root .dayhead{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:17px;margin:6px 0 8px}
   #vt-root .slots{display:flex;flex-direction:column;gap:8px}
-  #vt-root .slot{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border-radius:14px;padding:14px;border:1px solid var(--line);background:var(--card);min-height:58px}
-  #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:76px;flex:none}
-  #vt-root .s-time small{font-size:14px;font-weight:500;color:var(--muted)}
-  #vt-root .s-state{flex:1;font-size:15px}
+  #vt-root .slot{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border-radius:14px;padding:12px 12px 12px 14px;border:1px solid var(--line);background:var(--card);min-height:62px}
+  #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:70px;flex:none}
+  #vt-root .s-time small{font-size:14px;font-weight:500;opacity:.7}
+  #vt-root .s-main{flex:1;min-width:0;display:flex;flex-direction:column}
+  #vt-root .s-main b{font-size:16px} #vt-root .s-main small{font-size:13px;opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #vt-root .slot.free{border-color:transparent;background:var(--okbg);color:var(--ok)}
-  #vt-root .slot.free .s-time small{color:inherit;opacity:.75}
-  #vt-root .s-cta{background:var(--ok);color:var(--card);font-weight:700;padding:8px 16px;border-radius:10px;font-size:15px}
+  #vt-root .slot.free.alt{background:var(--altbg);color:var(--alt)}
+  #vt-root .s-cta{background:currentColor;border-radius:10px;padding:8px 16px;font-size:15px;font-weight:700;flex:none}
+  #vt-root .s-cta{color:var(--card)} #vt-root .slot.free .s-cta{background:var(--ok)} #vt-root .slot.free.alt .s-cta{background:var(--alt)}
   #vt-root .slot.taken{background:transparent;color:var(--muted)}
-  #vt-root .slot.mine{background:var(--soft);border-color:var(--accent);color:var(--accent);font-weight:600}
-  #vt-root .s-ok{width:32px;height:32px;border-radius:16px;background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;font-weight:700}
-  #vt-root .slot.taken .s-time{color:var(--muted)}
-  #vt-root .slot.multi{flex-wrap:wrap;align-items:flex-start}
-  #vt-root .slot.multi .chips{flex:1;display:flex;flex-wrap:wrap;gap:6px}
-  #vt-root .chip{border:0;background:var(--okbg);color:var(--ok);font-weight:600;border-radius:10px;padding:8px 12px;font-size:14px}
-  #vt-root .skeleton{height:58px;border-radius:14px;background:linear-gradient(90deg,var(--line),var(--card),var(--line));background-size:200% 100%;animation:vtsk 1.2s ease-in-out infinite;margin-bottom:8px}
+  #vt-root .slot.mine{background:var(--soft);border-color:var(--accent);color:var(--accent)}
+  #vt-root .s-ok{width:32px;height:32px;border-radius:16px;background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;font-weight:700;flex:none}
+  #vt-root .skeleton{height:62px;border-radius:14px;background:linear-gradient(90deg,var(--line),var(--card),var(--line));background-size:200% 100%;animation:vtsk 1.2s ease-in-out infinite;margin-bottom:8px}
   @keyframes vtsk{from{background-position:100% 0}to{background-position:-100% 0}}
   #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;justify-content:space-between}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
@@ -1037,27 +1163,47 @@
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
   #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)}
-  #vt-root .note{background:var(--soft);color:var(--accent);border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
+  #vt-root .note{display:flex;gap:10px;align-items:center;background:var(--soft);color:var(--accent);border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
   #vt-root .alert{background:var(--errbg);color:var(--err);border-radius:12px;padding:12px;margin:10px 0;font-size:14px;display:flex;align-items:center;gap:10px;justify-content:space-between}
-  #vt-root .btn-primary,#vt-root .btn-danger{display:block;width:100%;border:0;border-radius:14px;padding:15px;font-weight:700;font-size:16px;margin-top:14px}
+  #vt-root .hint{background:var(--resbg);color:var(--res);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+  #vt-root .btn-inline{border:0;background:var(--card);color:var(--res);font-weight:700;border-radius:8px;padding:6px 10px;font-size:14px}
+  #vt-root .btn-primary,#vt-root .btn-danger{display:block;width:100%;border:0;border-radius:14px;padding:15px;font-weight:700;font-size:16px;margin-top:12px}
   #vt-root .btn-primary{background:var(--accent);color:var(--accent-fg)} #vt-root .btn-danger{background:var(--err);color:#fff}
-  #vt-root .btn-primary:disabled{opacity:.5}
+  #vt-root .btn-primary:disabled,#vt-root .btn-danger:disabled{opacity:.45}
   #vt-root .big{padding:17px;font-size:17px}
   #vt-root .btn-ghost{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 14px;font-weight:600;font-size:14px;flex:none}
+  #vt-root .btn-ghost.wide{width:100%;margin-top:6px}
   #vt-root .btn-ghost.danger{color:var(--err)}
-  #vt-root .btn-ghost:disabled{opacity:.4}
-  #vt-root .btn-link{display:block;width:100%;background:none;border:0;color:var(--accent);padding:14px;font-size:15px}
-  #vt-root .mchoice{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:8px 0 12px}
-  #vt-root .pick{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;font-size:17px;font-weight:600;margin-bottom:8px}
-  #vt-root .pick.alt{font-weight:400;color:var(--muted)}
+  #vt-root .btn-link{display:block;width:100%;background:none;border:0;color:var(--accent);padding:12px;font-size:15px}
+  #vt-root .btn-icon{width:40px;height:40px;border:1px solid var(--line);background:var(--card);border-radius:10px;font-size:18px}
+  #vt-root .btn-icon:disabled{opacity:.3}
   #vt-root .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10;animation:vtfade .15s ease-out}
-  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:22px 18px calc(10px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;animation:vtup .18s ease-out}
+  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px calc(8px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto;animation:vtup .18s ease-out}
   @keyframes vtup{from{transform:translateY(30px);opacity:.5}} @keyframes vtfade{from{opacity:0}}
-  #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:2px}
+  #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:4px}
+  #vt-root .seg-l{display:flex;gap:6px;overflow-x:auto;margin:12px 0 4px;scrollbar-width:none}
+  #vt-root .seg-l button{flex:none;border:1px solid var(--line);background:var(--bg);border-radius:20px;padding:8px 14px;font-size:14px;font-weight:600}
+  #vt-root .seg-l button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+  #vt-root .countrow{display:flex;justify-content:space-between;align-items:center;margin:14px 0 8px;font-size:15px}
+  #vt-root .stepper{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:12px;padding:2px}
+  #vt-root .stepper button{width:40px;height:36px;border:0;background:none;font-size:20px;border-radius:10px}
+  #vt-root .stepper b{min-width:22px;text-align:center;font-size:17px}
+  #vt-root .mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px;margin:8px 0}
+  #vt-root .mbtn{border:2px solid var(--line);background:var(--card);border-radius:14px;padding:12px 6px;font-weight:700;font-size:15px;display:flex;flex-direction:column;align-items:center;gap:2px}
+  #vt-root .mbtn small{font-weight:500;font-size:12px;color:var(--muted)}
+  #vt-root .mbtn.on{border-color:var(--ok);background:var(--okbg);color:var(--ok)} #vt-root .mbtn.on small{color:var(--ok)}
+  #vt-root .mbtn.danger.on{border-color:var(--err);background:var(--errbg);color:var(--err)} #vt-root .mbtn.danger.on small{color:var(--err)}
+  #vt-root .mbtn:disabled{opacity:.4;text-decoration:line-through}
   #vt-root .sh-wait{display:flex;align-items:center;gap:10px;color:var(--muted);padding:22px 0}
-  #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none}
+  #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none;display:inline-block}
   #vt-root .success{text-align:center;font-size:18px;font-weight:700;color:var(--ok);padding:14px 0 4px}
   #vt-root .big-check{width:56px;height:56px;border-radius:28px;background:var(--okbg);display:grid;place-items:center;margin:0 auto 10px;font-size:30px}
+  #vt-root .order{margin:10px 0}
+  #vt-root .o-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+  #vt-root .o-n{width:24px;height:24px;border-radius:12px;background:var(--soft);color:var(--accent);display:grid;place-items:center;font-size:13px;font-weight:700}
+  #vt-root .o-name{flex:1;font-weight:600}
+  #vt-root .sh-foot{margin-top:10px;border-top:1px solid var(--line);padding-top:4px}
+  #vt-root .sh-foot .btn-link{color:var(--muted);padding:8px}
   #vt-root .login label{display:block;margin:12px 0;font-size:14px;color:var(--muted)}
   #vt-root .login input:not([type=checkbox]){display:block;width:100%;margin-top:4px;padding:13px;font-size:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--fg)}
   #vt-root .login label.check{display:flex;gap:10px;align-items:center;color:var(--fg);font-size:15px}
@@ -1066,8 +1212,6 @@
   #vt-root nav button{flex:1;background:none;border:0;padding:8px 0 10px;font-size:13px;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px}
   #vt-root nav .n-ic{font-size:21px;filter:grayscale(1);opacity:.7}
   #vt-root nav button.on{color:var(--accent);font-weight:700} #vt-root nav button.on .n-ic{filter:none;opacity:1}
-  #vt-root footer{margin-top:24px;border-top:1px solid var(--line);padding-top:8px}
-  #vt-root footer .btn-link{color:var(--muted);padding:8px}
   #vt-root .toast{position:fixed;left:50%;bottom:calc(88px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
@@ -1096,7 +1240,6 @@
     root.id = 'vt-root';
     document.body.appendChild(root);
     root.addEventListener('click', onClick);
-    root.addEventListener('change', onChange);
     root.addEventListener('submit', onSubmit);
     document.title = 'Vasketid';
     let meta = document.querySelector('meta[name=theme-color]');
@@ -1120,7 +1263,7 @@
   }
 
   // Til test udefra (ingen effekt i normal brug).
-  window.__vasketid = { S, render: () => render(), refresh, parseCalendar, parseStatus, parseBookings, parseTerminals };
+  window.__vasketid = { S, render: () => render(), refresh, slotsFor, bookingGroups, ordered };
 
   init();
 })();
