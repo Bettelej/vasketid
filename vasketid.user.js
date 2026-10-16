@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.8
+// @version      0.6.0
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -555,6 +555,7 @@
         }
         S.bookingsAt = Date.now();
         saveCache();
+        refreshDayPlan(); // så Status har tidspunkterne klar
       } catch (e) {
         handleError(e);
       } finally {
@@ -578,18 +579,21 @@
     const slots = parsed.cells.filter((c) => c.d === di && c.from && toMin(c.from) > nowMin())
       .sort((a, b) => toMin(a.from) - toMin(b.from));
     const next = {};
+    let known = nums ? [...nums] : null;
     let page = cal;
     for (const c of slots) {
-      if (nums.every((n) => next[n])) break;
-      if (!c.bookable) { // helt optaget: alle maskiner er booket her
-        nums.forEach((n) => { if (!next[n]) next[n] = c.from; });
+      if (known && known.every((n) => next[n])) break;
+      if (!c.bookable) { // helt optaget: alle (resterende) maskiner er booket her
+        if (known) known.forEach((n) => { if (!next[n]) next[n] = c.from; });
+        else next['*'] = c.from;
         break;
       }
       const mgPage = await postback(page, 'BookPass' + c.id, c.id);
       let mg;
       try { mg = parseMachineGroup(mgPage); } catch (e) { mg = { options: [] }; }
       const offered = mg.options.map((o) => machineNo(o.label));
-      nums.forEach((n) => {
+      if (!known) known = offered;
+      known.forEach((n) => {
         const o = mg.options.find((x) => machineNo(x.label) === n);
         if (!next[n] && (!o ? offered.length > 0 : o.disabled)) next[n] = c.from;
       });
@@ -601,7 +605,7 @@
   }
 
   async function refreshDayPlan() {
-    if (S.planBusy || !S.status) return;
+    if (S.planBusy) return;
     const today = dayTs(0);
     const todo = ordered().filter((t) => { const p = S.dayPlan[t]; return !p || p.day !== today || Date.now() - p.at > 5 * 60000; });
     if (!todo.length) return;
@@ -609,10 +613,9 @@
     render();
     try {
       for (const term of todo) {
-        const L = S.status.laundries.find((x) => sameLaundry(x.name, term));
+        const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
         const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
-        if (!G) continue;
-        const nums = G.machines.map((m) => machineNo(m.name));
+        const nums = G ? G.machines.map((m) => machineNo(m.name)) : null;
         const next = await serial(() => withSession(() => planDay(term, nums)));
         S.dayPlan[term] = { day: today, at: Date.now(), next };
         render();
@@ -1050,6 +1053,8 @@
     }
     const cls = stateClass(m.state);
     if (cls === 'err') return { cls, label: m.state, sub: '' };
+    // Uden for vasketiderne (fx efter 20:30 og før 07:00) er vaskeriet lukket.
+    if (!passNow()) return { cls: 'closed', label: 'Lukket', sub: `åbner kl. ${shortTime(passes()[0][0])}` };
     const last = (r = /Afsluttedes\s*(\d{1,2}[:.]\d{2})/i.exec(d)) ? `sidst brugt ${r[1].replace('.', ':')}` : '';
     if (cls === 'res') {
       const cur = passNow();
@@ -1059,7 +1064,7 @@
     }
     if (cls === 'ok') {
       if (!bookable || !plan) return { cls, label: 'Ledig', sub: '' };
-      const at = plan.next[machineNo(m.name)];
+      const at = plan.next[machineNo(m.name)] || plan.next['*'];
       return { cls, label: 'Ledig', sub: at ? `til kl. ${shortTime(at)}` : 'resten af dagen' };
     }
     return { cls, label: m.state, sub: last || d };
@@ -1081,7 +1086,8 @@
           const views = g.machines.map((m) => ({ m, v: machineView(m, !/tørre/i.test(g.type), plan) }));
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
-          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige nu${busy ? ` · ${busy} i brug` : ''}</span></div>
+          const closed = views.every((x) => x.v.cls === 'closed' || x.v.cls === 'run');
+          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${closed ? 'Lukket' : `${free} af ${g.machines.length} ledige nu`}${busy ? ` · ${busy} i brug` : ''}</span></div>
             <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub).replace(/ · /g, '<br>')}</div>` : ''}</div>`).join('')}</div></div>`;
         }).join('');
         // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
@@ -1439,7 +1445,7 @@
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
-  #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)}
+  #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)} #vt-root .mach.closed{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
   #vt-root .note{display:flex;gap:10px;align-items:center;background:var(--soft);color:var(--accent);border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
   #vt-root .alert{background:var(--errbg);color:var(--err);border-radius:12px;padding:12px;margin:10px 0;font-size:14px;display:flex;align-items:center;gap:10px;justify-content:space-between}
   #vt-root .hint{background:var(--resbg);color:var(--res);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
