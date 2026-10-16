@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.2
+// @version      0.5.3
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -985,7 +985,9 @@
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige${busy ? ` · ${busy} kører` : ''}</span></div>
             <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub)}</div>` : ''}</div>`).join('')}</div></div>`;
         }).join('');
-        html += `<section class="block card"><h2>${esc(L.name)}</h2>${groups}</section>`;
+        // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
+        const name = S.terms.find((t) => sameLaundry(t, L.name)) || L.name;
+        html += `<section class="block card"><h2>${esc(name)}</h2>${groups}</section>`;
       }
     } else if (!S.statusBusy && !S.statusError) {
       html += '<p class="empty">Henter status…</p>';
