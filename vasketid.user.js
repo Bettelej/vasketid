@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.0
+// @version      0.7.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1082,7 +1082,8 @@
         const free = s.items.filter((i) => i.cell.bookable);
         if (!free.length) return `<div class="slot taken">${t}<span class="s-main">Alt optaget</span></div>`;
         const best = free[0].term;
-        const others = free.slice(1).map((i) => shortName(i.term));
+        const othersAll = free.slice(1).map((i) => shortName(i.term));
+        const others = othersAll.length > 2 ? [`${othersAll[0]} +${othersAll.length - 1}`] : othersAll;
         const sub = best === top
           ? (others.length ? `Også: ${others.join(', ')}` : 'Kun ledig her')
           : `${shortName(top)} optaget${others.length ? ` · også: ${others.join(', ')}` : ''}`;
@@ -1460,9 +1461,23 @@
       } else if (k === 'sheet') {
         const old = el.querySelector('.sheet');
         const top = old ? old.scrollTop : 0;
+        const oldSeg = el.querySelector('.seg-l');
+        const segX = oldSeg ? oldSeg.scrollLeft : 0;
         el.innerHTML = html;
         const nw = el.querySelector('.sheet');
         if (nw && old) nw.scrollTop = top;
+        // Vaskeri-rækken i bookingvinduet: bliv stående og sørg for at det valgte kan ses.
+        const seg = el.querySelector('.seg-l');
+        if (seg) {
+          seg.scrollLeft = segX;
+          const on = seg.querySelector('.on');
+          if (on) {
+            const r = on.getBoundingClientRect();
+            const sr = seg.getBoundingClientRect();
+            if (r.left < sr.left) seg.scrollLeft -= sr.left - r.left + 12;
+            else if (r.right > sr.right) seg.scrollLeft += r.right - sr.right + 12;
+          }
+        }
       } else {
         el.innerHTML = html;
       }
@@ -1577,7 +1592,7 @@
   #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:66px;flex:none;white-space:nowrap}
   #vt-root .s-time small{font-size:14px;font-weight:500;opacity:.7}
   #vt-root .s-main{flex:1;min-width:0;display:flex;flex-direction:column}
-  #vt-root .s-main b{font-size:16px;overflow-wrap:anywhere} #vt-root .s-main small{font-size:13px;opacity:.8;line-height:1.3}
+  #vt-root .s-main b{font-size:15px} #vt-root .s-main small{font-size:13px;opacity:.8;line-height:1.3}
   #vt-root .slot.free{border-color:transparent;background:var(--okbg);color:var(--ok)}
   #vt-root .slot.free.alt{background:var(--altbg);color:var(--alt)}
   #vt-root .s-cta{background:currentColor;border-radius:10px;padding:8px 12px;font-size:15px;font-weight:700;flex:none}
