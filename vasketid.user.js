@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.4
+// @version      0.5.5
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -954,18 +954,46 @@
     return diff;
   }
 
-  // Hvordan en maskine vises: kører den, er den færdig, eller bare ledig/reserveret.
+  // Vasketiderne (pas) – fra kalenderen hvis den er hentet, ellers foreningens faste tider.
+  const DEFAULT_PASSES = [['07:00', '09:00'], ['09:00', '11:00'], ['11:00', '13:00'], ['13:00', '15:00'], ['15:00', '17:00'], ['17:00', '19:00'], ['19:00', '20:30']];
+  const toMin = (hm) => { const [h, m] = hm.split(':').map(Number); return h * 60 + m; };
+  function passes() {
+    const c = Object.values(S.cal).find((x) => x && x.cells && x.cells.length);
+    if (c) {
+      const map = new Map();
+      c.cells.forEach((x) => { if (x.from && x.to) map.set(x.from, x.to); });
+      if (map.size) return [...map].sort((x, y) => toMin(x[0]) - toMin(y[0]));
+    }
+    return DEFAULT_PASSES;
+  }
+  const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+  const passNow = () => passes().find(([f, t]) => toMin(f) <= nowMin() && nowMin() < toMin(t)) || null;
+  const nextPass = () => passes().find(([f]) => toMin(f) > nowMin()) || passes()[0];
+
+  // Status svarer på ét spørgsmål: kan maskinen bruges lige nu?
+  // "Reserveret" fra vasketur.dk betyder booket i den igangværende – eller, uden for vasketiderne, den næste – vasketid.
   function machineView(m) {
     const d = m.detail || '';
     let r;
     if ((r = /Klar\s*ca\.?:?\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
       const hm = r[1].replace('.', ':');
       const left = minutesUntil(hm);
-      return { cls: 'run', label: 'Kører', sub: `klar ca. ${hm}${left > 0 ? ` · om ${left} min` : ' · snart færdig'}` };
+      return { cls: 'run', label: 'I brug', sub: `klar ca. ${hm}${left > 0 ? ` · om ${left} min` : ' · snart færdig'}` };
+    }
+    if ((r = /Start\w*\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
+      const since = -minutesUntil(r[1].replace('.', ':'));
+      return { cls: 'run', label: 'I brug', sub: since > 0 ? `i gang i ${since} min` : 'lige startet' };
     }
     const cls = stateClass(m.state);
-    if ((r = /Afsluttedes\s*(\d{1,2}[:.]\d{2})/i.exec(d))) return { cls, label: m.state, sub: `færdig ${r[1].replace('.', ':')}` };
-    return { cls, label: m.state, sub: d };
+    if (cls === 'err') return { cls, label: m.state, sub: '' };
+    const last = (r = /Afsluttedes\s*(\d{1,2}[:.]\d{2})/i.exec(d)) ? `sidst brugt ${r[1].replace('.', ':')}` : '';
+    if (cls === 'res') {
+      const cur = passNow();
+      if (cur) return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(cur[1])}` };
+      return { cls: 'ok', label: 'Ledig', sub: `booket fra kl. ${shortTime(nextPass()[0])}` };
+    }
+    if (cls === 'ok') return { cls, label: 'Ledig', sub: last };
+    return { cls, label: m.state, sub: last || d };
   }
 
   function renderStatus() {
@@ -982,7 +1010,7 @@
           const views = g.machines.map((m) => ({ m, v: machineView(m) }));
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
-          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige${busy ? ` · ${busy} kører` : ''}</span></div>
+          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige nu${busy ? ` · ${busy} i brug` : ''}</span></div>
             <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub)}</div>` : ''}</div>`).join('')}</div></div>`;
         }).join('');
         // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
