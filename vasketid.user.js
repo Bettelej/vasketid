@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.6
+// @version      0.6.7
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -768,7 +768,6 @@
     }), true).then((res) => {
       sh.phase = 'done';
       sh.result = res;
-      if (res.done.length) { S.count = res.done.length; store.set('count', S.count); } // næste gang forvælges samme antal
       render();
       loadCalendar(c.term, sh.week).then(saveCache, () => {});
     }, (e) => {
@@ -1029,7 +1028,7 @@
     const c = S.terms.map((t) => S.cal[t + '|0']).filter(Boolean);
     const updated = c.length ? `Opdateret ${ago(Math.min(...c.map((x) => x.at)))}` : '';
     return `
-      <section class="block">
+      <section class="block book-block">
         <div class="daybar">
           <div class="days">${strip}</div>
           <div class="dayhead">
@@ -1183,10 +1182,6 @@
           const on = sh.sel.includes(o.label);
           return `<button class="mbtn ${on ? 'on' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
         }).join('')}</div>`;
-        if (free.length < S.count) {
-          const next = sh.cands[sh.idx + 1];
-          h += `<div class="hint">Kun ${free.length} ledig${free.length === 1 ? '' : 'e'} her.${next ? ` <button class="btn-inline" data-act="probe" data-i="${sh.idx + 1}">Se ${esc(shortName(next.term))}</button>` : ''}</div>`;
-        }
         const n = sh.sel.length;
         h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}` : 'Vælg mindst én maskine'}</button>`;
         if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere i alt.</div>`;
@@ -1464,7 +1459,8 @@
   #vt-root .empty{color:var(--muted);text-align:center;padding:28px 0}
   #vt-root .mybook{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
-  #vt-root .daybar{position:sticky;top:0;z-index:4;background:var(--bg);margin:0 -16px;padding:8px 16px 6px;border-bottom:1px solid var(--line)}
+  #vt-root .book-block{margin-top:0}
+  #vt-root .daybar{position:sticky;top:0;z-index:4;background:var(--bg);margin:-8px -16px 0;padding:8px 16px 6px;border-bottom:1px solid var(--line)}
   #vt-root .days{display:flex;gap:6px;overflow-x:auto;padding:2px 16px 8px;margin:0 -16px;scrollbar-width:none}
   #vt-root .days::-webkit-scrollbar{display:none}
   #vt-root .dayb{position:relative;flex:none;width:48px;border:1px solid var(--line);background:var(--card);border-radius:12px;padding:5px 0;display:flex;flex-direction:column;align-items:center;gap:0}
