@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.1
+// @version      0.7.2
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -456,7 +456,8 @@
     bookingsAt: store.get('bookingsAt', null),
     dayPlan: store.get('dayPlan', {}), // vaskeri -> {day, at, next: {maskinnr: 'HH:MM'}} – næste booking i dag pr. maskine
     planBusy: false,
-    mineSel: [], // markerede tider på Mine (gruppenøgler)
+    mineSel: [], // markerede maskiner på Mine (bookingnøgler)
+    mineOpen: [], // udfoldede tider på Mine (gruppenøgler)
     status: store.get('status', null),
     loading: false,
     statusBusy: '',
@@ -695,17 +696,18 @@
     const slot = slotsFor(ts).find((s) => s.from === fromKey);
     if (!slot) return;
     const ownTerms = slot.own.map((g) => g.term);
-    const cands = slot.items.filter((i) => i.cell.bookable).map((i) => ({ term: i.term, cellId: i.cell.id }))
-      .sort((a, b) => (ownTerms.includes(b.term) ? 1 : 0) - (ownTerms.includes(a.term) ? 1 : 0));
+    const cands = slot.items.filter((i) => i.cell.bookable).map((i) => ({ term: i.term, cellId: i.cell.id }));
     if (!cands.length) return;
-    S.sheet = { kind: 'book', phase: 'choose', day: ts, from: slot.from, to: slot.to, week: slot.week, cands, idx: 0, probes: {}, sel: [] };
+    const start = Math.max(0, cands.findIndex((c) => ownTerms.includes(c.term)));
+    S.sheet = { kind: 'book', phase: 'choose', day: ts, from: slot.from, to: slot.to, week: slot.week, cands, idx: start, probes: {}, sel: [], remove: [] };
     render();
-    probe(0);
+    probe(start);
   }
 
   function probe(idx) {
     const sh = S.sheet;
     if (!sh || sh.kind !== 'book') return;
+    if (sh.idx !== idx) sh.remove = [];
     sh.idx = idx;
     const c = sh.cands[idx];
     const p = sh.probes[c.term];
@@ -732,9 +734,18 @@
   function freeLabels(mg) { return mg.options.filter((o) => !o.disabled).map((o) => o.label); }
 
   // Dine egne maskiner i bookingvinduets tidsrum og vaskeri.
-  function ownMachines(sh, term) {
+  function ownItems(sh, term) {
     const g = bookingGroups().find((x) => x.day === sh.day && x.from === sh.from && x.term === term);
-    return g ? g.items.map((b) => machineNo(b.cells[1])) : [];
+    return g ? g.items : [];
+  }
+  const ownMachines = (sh, term) => ownItems(sh, term).map((b) => machineNo(b.cells[1]));
+
+  // Tryk på en af dine egne maskiner markerer den til afbestilling (og tilbage igen).
+  function toggleOwn(no) {
+    const sh = S.sheet;
+    if (!sh || sh.phase !== 'choose') return;
+    sh.remove = sh.remove.includes(no) ? sh.remove.filter((x) => x !== no) : [...sh.remove, no];
+    render();
   }
 
   function preselect() {
@@ -761,21 +772,33 @@
 
   function doBook() {
     const sh = S.sheet;
-    if (!sh || sh.phase !== 'choose' || !sh.sel.length) return;
+    if (!sh || sh.phase !== 'choose' || (!sh.sel.length && !sh.remove.length)) return;
     const c = sh.cands[sh.idx];
     const p = sh.probes[c.term];
     if (!p || p.state !== 'ok') return;
     const labels = freeLabels(p.mg).filter((l) => sh.sel.includes(l)); // i maskinrækkefølge
+    const removeItems = ownItems(sh, c.term).filter((b) => sh.remove.includes(machineNo(b.cells[1])));
     sh.phase = 'booking';
     sh.term = c.term;
-    sh.progress = `Booker ${labels[0]}…`;
+    sh.progress = removeItems.length ? 'Afbestiller…' : `Booker ${labels[0]}…`;
     render();
     // Maskinvalgs-siden er kun gyldig, hvis serveren ikke har flyttet sig siden (gælder kun det senest undersøgte vaskeri).
-    const fresh = sh.lastProbe === c.term ? p.mg : null;
-    serial(() => bookMachines(c.term, sh.week, c.cellId, labels, fresh, (i, n) => {
-      sh.progress = n > 1 ? `Booker maskine ${i} af ${n}…` : 'Booker…';
-      render();
-    }), true).then((res) => {
+    const fresh = sh.lastProbe === c.term && !removeItems.length ? p.mg : null;
+    serial(async () => {
+      let cancelled = [];
+      if (removeItems.length) {
+        const r = await withSession(() => cancelMany(c.term, removeItems.map((b) => b.key)));
+        S.bookMap[c.term] = r.after.map((x) => ({ ...x, term: c.term }));
+        cancelled = removeItems.filter((b) => !r.failed.includes(b.key)).map((b) => b.cells[1]);
+        if (r.failed.length) return { done: [], cancelled, left: null, error: new VtError('CANCEL', 'Ikke alle kunne afbestilles') };
+      }
+      if (!labels.length) return { done: [], cancelled, left: null, error: null };
+      const res = await bookMachines(c.term, sh.week, c.cellId, labels, fresh, (i, n) => {
+        sh.progress = n > 1 ? `Booker maskine ${i} af ${n}…` : 'Booker…';
+        render();
+      });
+      return { ...res, cancelled };
+    }, true).then((res) => {
       sh.phase = 'done';
       sh.result = res;
       render();
@@ -807,13 +830,30 @@
 
   function askCancelAll() {
     const all = bookingGroups();
-    const picked = all.filter((g) => S.mineSel.includes(groupKey(g)));
-    const groups = picked.length ? picked : all;
-    if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups, partial: picked.length > 0 && picked.length < all.length }; render(); }
+    const total = all.reduce((x, g) => x + g.items.length, 0);
+    const groups = S.mineSel.length
+      ? all.map((g) => ({ ...g, items: g.items.filter((b) => S.mineSel.includes(b.key)) })).filter((g) => g.items.length)
+      : all;
+    const n = groups.reduce((x, g) => x + g.items.length, 0);
+    if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups, partial: n < total }; render(); }
   }
 
-  function toggleMine(k) {
-    S.mineSel = S.mineSel.includes(k) ? S.mineSel.filter((x) => x !== k) : [...S.mineSel, k];
+  function toggleMineGroup(gk) {
+    const g = bookingGroups().find((x) => groupKey(x) === gk);
+    if (!g) return;
+    const keys = g.items.map((b) => b.key);
+    const allOn = keys.every((k) => S.mineSel.includes(k));
+    S.mineSel = allOn ? S.mineSel.filter((k) => !keys.includes(k)) : [...new Set([...S.mineSel, ...keys])];
+    render();
+  }
+
+  function toggleMineItem(key) {
+    S.mineSel = S.mineSel.includes(key) ? S.mineSel.filter((x) => x !== key) : [...S.mineSel, key];
+    render();
+  }
+
+  function toggleMineOpen(gk) {
+    S.mineOpen = S.mineOpen.includes(gk) ? S.mineOpen.filter((x) => x !== gk) : [...S.mineOpen, gk];
     render();
   }
 
@@ -1036,14 +1076,30 @@
   function renderBookings() {
     const groups = bookingGroups();
     if (!groups.length) return S.bookingsAt ? '<p class="muted small">Du har ingen vasketider booket.</p>' : '';
-    return groups.map((g, i) => `<div class="mybook ${S.mineSel.includes(groupKey(g)) ? 'sel' : ''}">
-        <button class="mb-check" data-act="mine-toggle" data-k="${esc(groupKey(g))}" aria-label="Markér">${S.mineSel.includes(groupKey(g)) ? '✓' : ''}</button>
-        <div class="mb-main">
-          <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
-          <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</div>
-        </div>
-        <button class="btn-ghost danger" data-act="cancel" data-i="${i}">Afbestil</button>
-      </div>`).join('');
+    return groups.map((g) => {
+      const gk = groupKey(g);
+      const keys = g.items.map((b) => b.key);
+      const n = keys.filter((k) => S.mineSel.includes(k)).length;
+      const state = n === 0 ? '' : n === keys.length ? 'all' : 'some';
+      const multi = g.items.length > 1;
+      const open = multi && S.mineOpen.includes(gk);
+      const sub = open
+        ? `<div class="mb-items">${g.items.map((b) => {
+          const on = S.mineSel.includes(b.key);
+          return `<div class="mb-item ${on ? 'sel' : ''}"><button class="mb-check small" data-act="mine-item" data-key="${esc(b.key)}" aria-label="Markér ${esc(b.cells[1])}">${on ? '✓' : ''}</button><span>${esc(b.cells[1])}</span></div>`;
+        }).join('')}</div>`
+        : '';
+      return `<div class="mybook ${state ? 'sel' : ''}">
+        <div class="mb-row">
+          <button class="mb-check ${state}" data-act="mine-group" data-k="${esc(gk)}" aria-label="Markér alle">${state === 'all' ? '✓' : state === 'some' ? '–' : ''}</button>
+          <div class="mb-main" ${multi ? `data-act="mine-open" data-k="${esc(gk)}"` : ''}>
+            <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
+            <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((x) => x.cells[1])))}</div>
+          </div>
+          ${multi ? `<button class="mb-fold ${open ? 'open' : ''}" data-act="mine-open" data-k="${esc(gk)}" aria-label="Vis maskiner">›</button>` : ''}
+        </div>${sub}
+      </div>`;
+    }).join('');
   }
 
   function renderBook() {
@@ -1117,14 +1173,12 @@
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
     const groups = bookingGroups();
-    S.mineSel = S.mineSel.filter((k) => groups.some((g) => groupKey(g) === k)); // glem markeringer for tider, der er væk
-    const picked = groups.filter((g) => S.mineSel.includes(groupKey(g)));
-    const count = (gs) => gs.reduce((n, g) => n + g.items.length, 0);
-    const all = picked.length
-      ? `<button class="btn-danger wide-danger" data-act="cancel-all">Afbestil valgte (${count(picked)} maskine${count(picked) === 1 ? '' : 'r'})</button>`
-      : groups.length > 1
-        ? `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${count(groups)} maskiner)</button>`
-        : '';
+    const allKeys = groups.flatMap((g) => g.items.map((b) => b.key));
+    S.mineSel = S.mineSel.filter((k) => allKeys.includes(k)); // glem markeringer for maskiner, der er væk
+    const n = S.mineSel.length;
+    const all = n
+      ? `<button class="btn-danger wide-danger" data-act="cancel-all">Afbestil valgte (${n} maskine${n === 1 ? '' : 'r'})</button>`
+      : `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${allKeys.length} maskine${allKeys.length === 1 ? '' : 'r'})</button>`;
     return `<section class="block">${all}${list}</section>`;
   }
 
@@ -1256,13 +1310,22 @@
         const free = freeLabels(p.mg);
         const mine = ownMachines(sh, c.term);
         h += `<div class="mgrid">${p.mg.options.map((o) => {
+          const no = machineNo(o.label);
+          if (o.disabled && mine.includes(no)) {
+            const rm = sh.remove.includes(no);
+            return `<button class="mbtn own ${rm ? 'rm' : ''}" data-act="machine-own" data-no="${esc(no)}">${esc(o.label)}<small>${rm ? 'afbestilles' : 'din'}</small></button>`;
+          }
           const on = sh.sel.includes(o.label);
-          const isMine = o.disabled && mine.includes(machineNo(o.label));
-          return `<button class="mbtn ${on ? 'on' : ''} ${isMine ? 'own' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${isMine ? 'din' : o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
+          return `<button class="mbtn ${on ? 'on' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
         }).join('')}</div>`;
         const n = sh.sel.length;
-        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}` : (ownMachines(sh, c.term).length ? 'Vælg flere maskiner' : 'Vælg mindst én maskine')}</button>`;
-        if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere i alt.</div>`;
+        const m = sh.remove.length;
+        const label = n && m ? `Book ${n} · afbestil ${m}`
+          : n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}`
+            : m ? `Afbestil ${m === 1 ? `Vask ${esc(sh.remove[0])}` : `${m} maskiner`}`
+              : (mine.length ? 'Vælg flere maskiner' : 'Vælg mindst én maskine');
+        h += `<button class="${m && !n ? 'btn-danger' : 'btn-primary'} big" data-act="do-book" ${n || m ? '' : 'disabled'}>${label}</button>`;
+        if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere på ${esc(shortName(c.term))}.</div>`;
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
     } else if (sh.phase === 'booking') {
@@ -1272,8 +1335,11 @@
       if (r.done.length) {
         h += `<div class="success"><div class="big-check">✓</div>Booket på ${esc(shortName(sh.term))}:<br>${esc(machineList(r.done))}</div>`;
       }
+      if (r.cancelled && r.cancelled.length) {
+        h += `<div class="success ${r.done.length ? 'small-ok' : ''}">${r.done.length ? '' : '<div class="big-check">✓</div>'}Afbestilt: ${esc(machineList(r.cancelled))}</div>`;
+      }
       if (r.error) h += `<div class="alert">${r.done.length ? 'Resten gik ikke igennem: ' : ''}${esc(r.error.message)}</div>`;
-      if (r.left != null) h += `<div class="muted small center">Du kan booke ${r.left} maskine${r.left === 1 ? '' : 'r'} mere i alt.</div>`;
+      if (r.left != null) h += `<div class="muted small center">Du kan booke ${r.left} maskine${r.left === 1 ? '' : 'r'} mere på ${esc(shortName(sh.term))}.</div>`;
       h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
     }
     return h;
@@ -1508,6 +1574,7 @@
       case 'book': openBooking(el.dataset.from, +el.dataset.ts); break;
       case 'probe': probe(+el.dataset.i); break;
       case 'machine': toggleMachine(el.dataset.label); break;
+      case 'machine-own': toggleOwn(el.dataset.no); break;
       case 'count': setCount(S.count + +el.dataset.d); break;
       case 'do-book': doBook(); break;
       case 'close-sheet': closeSheet(); break;
@@ -1515,7 +1582,9 @@
       case 'toggle-cancel': toggleCancel(el.dataset.key); break;
       case 'do-cancel': doCancel(); break;
       case 'cancel-all': askCancelAll(); break;
-      case 'mine-toggle': toggleMine(el.dataset.k); break;
+      case 'mine-group': toggleMineGroup(el.dataset.k); break;
+      case 'mine-item': toggleMineItem(el.dataset.key); break;
+      case 'mine-open': toggleMineOpen(el.dataset.k); break;
       case 'do-cancel-all': doCancelAll(); break;
       case 'move': moveOrder(el.dataset.term, +el.dataset.d); break;
       case 'toggle-laundry': toggleLaundry(el.dataset.term); break;
@@ -1562,9 +1631,17 @@
   #vt-root .card h2{color:var(--fg);text-transform:none;letter-spacing:0;font-size:17px}
   #vt-root .muted{color:var(--muted)} #vt-root .small{font-size:13px} #vt-root .center{text-align:center}
   #vt-root .empty{color:var(--muted);text-align:center;padding:28px 0}
-  #vt-root .mybook{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
+  #vt-root .mybook{display:block;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
   #vt-root .mb-check{width:28px;height:28px;border-radius:14px;border:2px solid var(--line);background:var(--card);color:var(--accent-fg);font-weight:700;font-size:15px;flex:none;display:grid;place-items:center;padding:0}
-  #vt-root .mybook.sel{border-color:var(--err);border-left-color:var(--err)} #vt-root .mybook.sel .mb-check{background:var(--err);border-color:var(--err);color:#fff}
+  #vt-root .mb-row{display:flex;align-items:center;gap:12px}
+  #vt-root .mybook.sel{border-color:var(--err);border-left-color:var(--err)}
+  #vt-root .mb-check.all,#vt-root .mb-check.some,#vt-root .mb-item.sel .mb-check{background:var(--err);border-color:var(--err);color:#fff}
+  #vt-root .mb-check.small{width:24px;height:24px;font-size:13px}
+  #vt-root .mb-main[data-act]{cursor:pointer}
+  #vt-root .mb-fold{width:36px;height:36px;border:0;background:none;color:var(--muted);font-size:22px;flex:none;transition:transform .15s}
+  #vt-root .mb-fold.open{transform:rotate(90deg)}
+  #vt-root .mb-items{margin:8px 0 0 40px;display:flex;flex-direction:column;gap:6px}
+  #vt-root .mb-item{display:flex;align-items:center;gap:10px;font-size:15px}
   #vt-root .btn-danger.wide-danger{margin:0 0 10px;padding:12px;font-size:15px}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
   #vt-root .book-block{margin-top:0}
@@ -1647,7 +1724,9 @@
   #vt-root .mbtn.on{border-color:var(--ok);background:var(--okbg);color:var(--ok)} #vt-root .mbtn.on small{color:var(--ok)}
   #vt-root .mbtn.danger.on{border-color:var(--err);background:var(--errbg);color:var(--err)} #vt-root .mbtn.danger.on small{color:var(--err)}
   #vt-root .mbtn:disabled{opacity:.4;text-decoration:line-through}
-  #vt-root .mbtn.own:disabled{opacity:1;text-decoration:none;border-color:var(--accent);background:var(--soft);color:var(--accent)} #vt-root .mbtn.own small{color:var(--accent)}
+  #vt-root .mbtn.own{border-color:var(--accent);background:var(--soft);color:var(--accent)} #vt-root .mbtn.own small{color:var(--accent)}
+  #vt-root .mbtn.own.rm{border-color:var(--err);background:var(--errbg);color:var(--err);text-decoration:line-through} #vt-root .mbtn.own.rm small{color:var(--err);text-decoration:none}
+  #vt-root .success.small-ok{font-size:15px;padding-top:0}
   #vt-root .s-more{border:1px solid var(--accent);color:var(--accent);border-radius:10px;padding:7px 10px;font-size:13px;font-weight:700;flex:none;white-space:nowrap}
   #vt-root .sh-wait{display:flex;align-items:center;gap:10px;color:var(--muted);padding:22px 0}
   #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none;display:inline-block}
