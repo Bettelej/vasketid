@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.3
+// @version      0.6.4
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1525,7 +1525,7 @@
   #vt-root .backdrop.anim{animation:vtfade .15s ease-out}
   #vt-root .sheet.anim{animation:vtup .18s ease-out}
   #vt-root .part{flex:none}
-  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px calc(8px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto}
+  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px 8px;max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto}
   @keyframes vtup{from{transform:translateY(30px);opacity:.5}} @keyframes vtfade{from{opacity:0}}
   #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:4px;padding-right:44px}
   #vt-root .sh-close{position:absolute;top:12px;right:12px;width:40px;height:40px;border-radius:20px;border:0;background:var(--bg);color:var(--muted);font-size:18px;display:grid;place-items:center}
@@ -1566,17 +1566,17 @@
   #vt-root .login label.check{display:flex;gap:10px;align-items:center;color:var(--fg);font-size:15px}
   #vt-root .login input[type=checkbox]{width:20px;height:20px}
   #vt-root .scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
-  #vt-root nav{flex:none;z-index:6;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+  #vt-root nav{flex:none;z-index:6;display:flex;background:var(--card);border-top:1px solid var(--line)}
   #vt-root nav button{position:relative;flex:1;background:none;border:0;padding:8px 0 9px;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12px}
   #vt-root nav button.on{color:var(--accent);font-weight:600}
   #vt-root nav .badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--accent-fg);font-size:11px;font-weight:700;display:grid;place-items:center}
-  #vt-root .toast{position:fixed;left:50%;bottom:calc(88px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
+  #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
   function addViewport() {
     let m = document.querySelector('meta[name=viewport]');
     if (!m) { m = document.createElement('meta'); m.name = 'viewport'; document.head.appendChild(m); }
-    m.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+    m.content = 'width=device-width, initial-scale=1';
   }
 
   function showReturnButton() {
