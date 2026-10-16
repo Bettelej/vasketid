@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.1
+// @version      0.5.2
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,6 +23,8 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
+  // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
+  const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem(KEY + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -477,7 +479,9 @@
     if (!S.order) return [];
     return S.order.map((o) => S.terms.find((t) => sameLaundry(o, t))).filter(Boolean);
   }
-  const unselected = () => { const o = ordered(); return S.terms.filter((t) => !o.includes(t)); };
+  function hillRank(t) { const i = HILL_ORDER.findIndex((h) => sameLaundry(h, t)); return i < 0 ? 99 : i; }
+  const byHill = (list) => [...list].sort((a, b) => hillRank(a) - hillRank(b));
+  const unselected = () => { const o = ordered(); return byHill(S.terms.filter((t) => !o.includes(t))); };
 
   function bookingDate(b) { const d = parseDanishDate(b.cells[0]); return d ? +d : null; }
 
@@ -970,7 +974,7 @@
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
       const order = ordered();
-      const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 99 : i; };
+      const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 50 + hillRank(n) : i; };
       const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
       html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.</p>`;
       for (const L of ls) {
@@ -1089,7 +1093,7 @@
 
   function renderSetup() {
     const list = S.terms.length
-      ? S.terms.map((t) => {
+      ? byHill(S.terms).map((t) => {
         const n = S.setupPick.indexOf(t) + 1;
         return `<button class="pick ${n ? 'on' : ''}" data-act="pick" data-term="${esc(t)}"><span class="o-n">${n || ''}</span>${esc(t)}</button>`;
       }).join('')
