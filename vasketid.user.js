@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.5
+// @version      0.6.6
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -768,6 +768,7 @@
     }), true).then((res) => {
       sh.phase = 'done';
       sh.result = res;
+      if (res.done.length) { S.count = res.done.length; store.set('count', S.count); } // næste gang forvælges samme antal
       render();
       loadCalendar(c.term, sh.week).then(saveCache, () => {});
     }, (e) => {
@@ -1178,7 +1179,6 @@
         if (sh.idx + 1 < sh.cands.length) h += `<button class="btn-ghost wide" data-act="probe" data-i="${sh.idx + 1}">Prøv ${esc(shortName(sh.cands[sh.idx + 1].term))}</button>`;
       } else if (p.state === 'ok') {
         const free = freeLabels(p.mg);
-        h += `<div class="countrow"><span>Antal maskiner</span><span class="stepper"><button data-act="count" data-d="-1" aria-label="Færre">−</button><b>${S.count}</b><button data-act="count" data-d="1" aria-label="Flere">+</button></span></div>`;
         h += `<div class="mgrid">${p.mg.options.map((o) => {
           const on = sh.sel.includes(o.label);
           return `<button class="mbtn ${on ? 'on' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
