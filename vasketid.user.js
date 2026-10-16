@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.4
+// @version      0.6.5
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1029,7 +1029,6 @@
     const updated = c.length ? `Opdateret ${ago(Math.min(...c.map((x) => x.at)))}` : '';
     return `
       <section class="block">
-        <h2>Book vask</h2>
         <div class="daybar">
           <div class="days">${strip}</div>
           <div class="dayhead">
@@ -1047,10 +1046,10 @@
     const list = renderBookings();
     if (!list) return '<p class="empty">Henter dine vasketider…</p>';
     if (!bookingGroups().length) {
-      return `<section class="block"><h2>Mine vasketider</h2>${list}
+      return `<section class="block">${list}
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
-    return `<section class="block"><h2>Mine vasketider</h2>${list}</section>`;
+    return `<section class="block">${list}</section>`;
   }
 
   function stateClass(s) {
@@ -1120,7 +1119,7 @@
   }
 
   function renderStatus() {
-    let html = '<section class="block status-h"><h2>Status</h2></section>';
+    let html = '';
     if (S.statusBusy) html += `<div class="note"><span class="spinner"></span>${esc(S.statusBusy)}</div>`;
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
@@ -1342,7 +1341,7 @@
     const sheet = renderSheet(!!S.sheet && !sheetWasOpen);
     sheetWasOpen = !!S.sheet;
     const parts = {
-      header: `<div class="h-row"><h1>Vasketid</h1>
+      header: `<div class="h-row"><h1>${S.view === 'app' ? { book: 'Book vask', mine: 'Mine vasketider', status: 'Status' }[S.tab] : 'Vasketid'}</h1>
           ${S.view === 'app' ? `<button class="icon" data-act="refresh" aria-label="Opdatér"><span class="${busy ? 'spin' : ''}">↻</span></button>
           <button class="icon" data-act="settings" aria-label="Indstillinger">⚙</button>` : ''}</div>
         <div class="progress ${busy ? 'on' : ''}"></div>`,
