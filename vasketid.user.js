@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.8
+// @version      0.6.9
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1107,7 +1107,7 @@
     const all = groups.length > 1
       ? `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${groups.reduce((n, g) => n + g.items.length, 0)} maskiner)</button>`
       : '';
-    return `<section class="block">${list}${all}</section>`;
+    return `<section class="block">${all}${list}</section>`;
   }
 
   function stateClass(s) {
@@ -1582,6 +1582,7 @@
   #vt-root .big{padding:17px;font-size:17px}
   #vt-root .btn-ghost{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 14px;font-weight:600;font-size:14px;flex:none}
   #vt-root .btn-ghost.wide{width:100%;margin-top:6px}
+  #vt-root .block > .btn-ghost.wide:first-child{margin:0 0 10px}
   #vt-root .cl-list{margin:10px 0;font-size:14px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
   #vt-root .btn-ghost.danger{color:var(--err)}
   #vt-root .btn-link{display:block;width:100%;background:none;border:0;color:var(--accent);padding:12px;font-size:15px}
