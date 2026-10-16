@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.6
+// @version      0.5.7
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -972,7 +972,7 @@
 
   // Status svarer på ét spørgsmål: kan maskinen bruges lige nu?
   // "Reserveret" fra vasketur.dk betyder booket i den igangværende – eller, uden for vasketiderne, den næste – vasketid.
-  function machineView(m) {
+  function machineView(m, bookable = true) {
     const d = m.detail || '';
     let r;
     if ((r = /Klar\s*ca\.?:?\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
@@ -990,9 +990,14 @@
     if (cls === 'res') {
       const cur = passNow();
       if (cur) return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(cur[1])}` };
-      return { cls: 'ok', label: 'Ledig', sub: `booket fra kl. ${shortTime(nextPass()[0])}` };
+      return { cls: 'ok', label: 'Ledig', sub: `til kl. ${shortTime(nextPass()[0])}` };
     }
-    if (cls === 'ok') return { cls, label: 'Ledig', sub: last };
+    if (cls === 'ok') {
+      if (!bookable) return { cls, label: 'Ledig', sub: '' };
+      // Ikke booket nu/næste gang: fri mindst til slutningen af den igangværende eller næste vasketid.
+      const until = (passNow() || nextPass())[1];
+      return { cls, label: 'Ledig', sub: `til mindst kl. ${shortTime(until)}` };
+    }
     return { cls, label: m.state, sub: last || d };
   }
 
@@ -1007,7 +1012,7 @@
       html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
-          const views = g.machines.map((m) => ({ m, v: machineView(m) }));
+          const views = g.machines.map((m) => ({ m, v: machineView(m, !/tørre/i.test(g.type)) }));
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige nu${busy ? ` · ${busy} i brug` : ''}</span></div>
