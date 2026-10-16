@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.0
+// @version      0.5.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1113,12 +1113,12 @@
     return `<div class="backdrop" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet" role="dialog">${x}${inner}</div>`;
   }
 
-  const svg = (body) => `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
-  const CAL = '<rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M8 3v4M16 3v4M3 10h18"/>';
+  // Ikoner fra Tabler Icons (MIT-licens), tegnet som inline SVG så de ser ens ud på alle telefoner.
+  const svg = (body) => `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
   const ICONS = {
-    book: svg(CAL + '<path d="M12 13v5M9.5 15.5h5"/>'),
-    mine: svg(CAL + '<path d="M8.5 15.5l2.5 2.5 4.5-4.5"/>'),
-    status: svg('<rect x="4" y="2.5" width="16" height="19" rx="2.5"/><circle cx="12" cy="13.5" r="4.5"/><path d="M7.5 6h1M10.5 6h1"/>'),
+    mine: svg('<path d="M3.5 5.5l1.5 1.5l2.5 -2.5"/><path d="M3.5 11.5l1.5 1.5l2.5 -2.5"/><path d="M3.5 17.5l1.5 1.5l2.5 -2.5"/><path d="M11 6h9"/><path d="M11 12h9"/><path d="M11 18h9"/>'),
+    book: svg('<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M9 12h6"/><path d="M12 9v6"/>'),
+    status: svg('<path d="M5 5a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z"/><path d="M8 14a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M8 6h.01"/><path d="M11 6h.01"/><path d="M14 6h2"/><path d="M8 14c1.333 -.667 2.667 -.667 4 0c1.333 .667 2.667 .667 4 0"/>'),
   };
 
   let root;
@@ -1146,9 +1146,9 @@
       </header>
       <div class="scroll"><main>${main}</main></div>
       ${S.view === 'app' ? `<nav>
-        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book" aria-label="Book" title="Book">${ICONS.book}</button>
-        <button class="${S.tab === 'mine' ? 'on' : ''}" data-act="tab" data-tab="mine" aria-label="Dine vasketider" title="Dine vasketider">${ICONS.mine}${bookingGroups().length ? `<span class="badge">${bookingGroups().length}</span>` : ''}</button>
-        <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status" aria-label="Status" title="Status">${ICONS.status}</button>
+        <button class="${S.tab === 'mine' ? 'on' : ''}" data-act="tab" data-tab="mine">${ICONS.mine}<span>Mine</span>${bookingGroups().length ? `<span class="badge">${bookingGroups().length}</span>` : ''}</button>
+        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book">${ICONS.book}<span>Book</span></button>
+        <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status">${ICONS.status}<span>Status</span></button>
       </nav>` : ''}
       ${renderSheet()}
       ${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ''}`;
@@ -1326,10 +1326,9 @@
   #vt-root .login input[type=checkbox]{width:20px;height:20px}
   #vt-root .scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
   #vt-root nav{flex:none;z-index:6;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
-  #vt-root nav button{position:relative;flex:1;background:none;border:0;height:58px;color:var(--muted);display:grid;place-items:center}
-  #vt-root nav button.on{color:var(--accent)}
-  #vt-root nav button.on::before{content:"";position:absolute;top:0;left:30%;right:30%;height:3px;border-radius:0 0 3px 3px;background:var(--accent)}
-  #vt-root nav .badge{position:absolute;top:8px;left:calc(50% + 8px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--accent-fg);font-size:11px;font-weight:700;display:grid;place-items:center}
+  #vt-root nav button{position:relative;flex:1;background:none;border:0;padding:8px 0 9px;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12px}
+  #vt-root nav button.on{color:var(--accent);font-weight:600}
+  #vt-root nav .badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--accent-fg);font-size:11px;font-weight:700;display:grid;place-items:center}
   #vt-root .toast{position:fixed;left:50%;bottom:calc(88px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
