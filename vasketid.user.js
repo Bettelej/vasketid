@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.3
+// @version      0.5.4
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1077,10 +1077,8 @@
   function renderSettingsSheet() {
     const list = ordered();
     const rest = unselected();
-    let h = '<div class="sh-title">Indstillinger</div><p class="muted small">Dine vaskerier – appen foreslår altid det øverste med plads.</p>';
-    h += `<div class="order">${list.map((t, i) => `<div class="o-row"><span class="o-n">${i + 1}</span><span class="o-name">${esc(t)}</span>
-      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Flyt op">↑</button>
-      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="1" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Flyt ned">↓</button>
+    let h = '<div class="sh-title">Indstillinger</div><p class="muted small">Dine vaskerier – appen foreslår altid det øverste med plads. Træk i ≡ for at ændre rækkefølgen.</p>';
+    h += `<div class="order">${list.map((t, i) => `<div class="o-row"><span class="o-handle" aria-label="Træk for at flytte">${GRIP}</span><span class="o-n">${i + 1}</span><span class="o-name">${esc(t)}</span>
       <button class="btn-rm" data-act="toggle-laundry" data-term="${esc(t)}" ${list.length === 1 ? 'disabled' : ''}>Fjern</button></div>`).join('')}</div>`;
     if (rest.length) {
       h += `<p class="muted small">Tilføj vaskeri:</p><div class="addrow">${rest.map((t) => `<button class="btn-ghost" data-act="toggle-laundry" data-term="${esc(t)}">+ ${esc(shortName(t))}</button>`).join('')}</div>`;
@@ -1110,13 +1108,14 @@
     </section>`;
   }
 
-  function renderSheet() {
+  function renderSheet(opening) {
     const sh = S.sheet;
     if (!sh) return '';
+    const anim = opening ? ' anim' : '';
     const inner = sh.kind === 'book' ? renderBookSheet(sh) : sh.kind === 'cancel' ? renderCancelSheet(sh) : renderSettingsSheet();
     const canClose = !(sh.phase === 'booking' || sh.phase === 'cancelling');
     const x = canClose ? '<button class="sh-close" data-act="close-sheet" aria-label="Luk">✕</button>' : '';
-    return `<div class="backdrop" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet" role="dialog">${x}${inner}</div>`;
+    return `<div class="backdrop${anim}" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet${anim}" role="dialog">${x}${inner}</div>`;
   }
 
   // Ikoner fra Tabler Icons (MIT-licens), tegnet som inline SVG så de ser ens ud på alle telefoner.
@@ -1128,6 +1127,53 @@
   };
 
   let root;
+  const GRIP = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 8h14M5 12h14M5 16h14"/></svg>';
+
+  let drag = null;
+  function onPointerDown(ev) {
+    const handle = ev.target.closest('.o-handle');
+    if (!handle) return;
+    const row = handle.closest('.o-row');
+    const rows = [...row.parentElement.children];
+    drag = { row, rows, startY: ev.clientY, from: rows.indexOf(row), to: rows.indexOf(row), step: row.getBoundingClientRect().height };
+    row.classList.add('dragging');
+    handle.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  }
+  function onPointerMove(ev) {
+    if (!drag) return;
+    const dy = ev.clientY - drag.startY;
+    drag.row.style.transform = `translateY(${dy}px)`;
+    const to = Math.max(0, Math.min(drag.rows.length - 1, Math.round(drag.from + dy / drag.step)));
+    if (to === drag.to) return;
+    drag.to = to;
+    drag.rows.forEach((r, i) => {
+      if (r === drag.row) return;
+      let shift = 0;
+      if (drag.from < to && i > drag.from && i <= to) shift = -drag.step;
+      if (drag.from > to && i < drag.from && i >= to) shift = drag.step;
+      r.style.transform = shift ? `translateY(${shift}px)` : '';
+    });
+  }
+  function onPointerUp() {
+    if (!drag) return;
+    const { from, to } = drag;
+    drag = null;
+    if (from !== to) {
+      const list = ordered();
+      const [t] = list.splice(from, 1);
+      list.splice(to, 0, t);
+      S.order = list.map(shortName);
+      store.set('order', S.order);
+    }
+    lastParts.sheet = undefined; // tegn listen forfra i den nye rækkefølge
+    render();
+  }
+
+  // Skærmen består af faste dele; kun de dele, hvis indhold har ændret sig, tegnes forfra.
+  // Så hopper et åbent vindue ikke, når der kommer nye data i baggrunden.
+  const lastParts = {};
+  let sheetWasOpen = false;
   function render() {
     if (!root) return;
     const busy = running || S.loading || !!S.statusBusy;
@@ -1139,34 +1185,53 @@
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       main += S.tab === 'book' ? renderBook() : S.tab === 'mine' ? renderMine() : renderStatus();
     }
-    const scroller = root.querySelector('.scroll');
-    const scrollY = scroller ? scroller.scrollTop : 0;
-    const daysEl = root.querySelector('.days');
-    const daysX = daysEl ? daysEl.scrollLeft : null;
-    root.innerHTML = `
-      <header>
-        <div class="h-row"><h1>Vasketid</h1>
+    const sheet = renderSheet(!!S.sheet && !sheetWasOpen);
+    sheetWasOpen = !!S.sheet;
+    const parts = {
+      header: `<div class="h-row"><h1>Vasketid</h1>
           ${S.view === 'app' ? `<button class="icon" data-act="refresh" aria-label="Opdatér"><span class="${busy ? 'spin' : ''}">↻</span></button>
           <button class="icon" data-act="settings" aria-label="Indstillinger">⚙</button>` : ''}</div>
-        <div class="progress ${busy ? 'on' : ''}"></div>
-      </header>
-      <div class="scroll"><main>${main}</main></div>
-      ${S.view === 'app' ? `<nav>
+        <div class="progress ${busy ? 'on' : ''}"></div>`,
+      main,
+      nav: S.view === 'app' ? `<nav>
         <button class="${S.tab === 'mine' ? 'on' : ''}" data-act="tab" data-tab="mine">${ICONS.mine}<span>Mine</span>${bookingGroups().length ? `<span class="badge">${bookingGroups().length}</span>` : ''}</button>
         <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book">${ICONS.book}<span>Book</span></button>
         <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status">${ICONS.status}<span>Status</span></button>
-      </nav>` : ''}
-      ${renderSheet()}
-      ${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ''}`;
-    const sc = root.querySelector('.scroll');
-    if (sc) sc.scrollTop = scrollY;
-    const newDays = root.querySelector('.days');
-    if (newDays) {
-      if (daysX != null) newDays.scrollLeft = daysX;
-      else {
-        const on = newDays.querySelector('.on');
-        if (on) newDays.scrollLeft += on.getBoundingClientRect().left - newDays.getBoundingClientRect().left - (newDays.clientWidth - on.clientWidth) / 2;
+      </nav>` : '',
+      sheet,
+      toast: S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '',
+    };
+    if (!root.firstChild) {
+      root.innerHTML = '<header data-part="header"></header><div class="scroll"><main data-part="main"></main></div><div class="part" data-part="nav"></div><div class="part" data-part="sheet"></div><div class="part" data-part="toast"></div>';
+    }
+    for (const [k, html] of Object.entries(parts)) {
+      // Animationen må kun køre, når vinduet åbnes – ikke ved hver opdatering af det.
+      const cmp = k === 'sheet' ? html.replace(/ anim"/g, '"') : html;
+      if (lastParts[k] === cmp) continue;
+      if (k === 'sheet' && drag) continue; // ikke midt i et træk
+      const el = root.querySelector(`[data-part="${k}"]`);
+      if (k === 'main') {
+        const daysEl = el.querySelector('.days');
+        const daysX = daysEl ? daysEl.scrollLeft : null;
+        el.innerHTML = html;
+        const newDays = el.querySelector('.days');
+        if (newDays) {
+          if (daysX != null) newDays.scrollLeft = daysX;
+          else {
+            const on = newDays.querySelector('.on');
+            if (on) newDays.scrollLeft += on.getBoundingClientRect().left - newDays.getBoundingClientRect().left - (newDays.clientWidth - on.clientWidth) / 2;
+          }
+        }
+      } else if (k === 'sheet') {
+        const old = el.querySelector('.sheet');
+        const top = old ? old.scrollTop : 0;
+        el.innerHTML = html;
+        const nw = el.querySelector('.sheet');
+        if (nw && old) nw.scrollTop = top;
+      } else {
+        el.innerHTML = html;
       }
+      lastParts[k] = cmp;
     }
   }
 
@@ -1292,8 +1357,11 @@
   #vt-root .btn-icon:disabled{opacity:.3}
   #vt-root .btn-rm{height:40px;border:1px solid var(--line);background:var(--card);color:var(--err);border-radius:10px;padding:0 10px;font-size:14px;font-weight:600}
   #vt-root .btn-rm:disabled{opacity:.3}
-  #vt-root .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10;animation:vtfade .15s ease-out}
-  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px calc(8px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto;animation:vtup .18s ease-out}
+  #vt-root .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10}
+  #vt-root .backdrop.anim{animation:vtfade .15s ease-out}
+  #vt-root .sheet.anim{animation:vtup .18s ease-out}
+  #vt-root .part{flex:none}
+  #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px calc(8px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto}
   @keyframes vtup{from{transform:translateY(30px);opacity:.5}} @keyframes vtfade{from{opacity:0}}
   #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:4px;padding-right:44px}
   #vt-root .sh-close{position:absolute;top:12px;right:12px;width:40px;height:40px;border-radius:20px;border:0;background:var(--bg);color:var(--muted);font-size:18px;display:grid;place-items:center}
@@ -1321,7 +1389,10 @@
   #vt-root .addrow{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
   #vt-root .sh-foot a.btn-link{text-align:center;text-decoration:none}
   #vt-root .order{margin:10px 0}
-  #vt-root .o-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+  #vt-root .o-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);background:var(--card);transition:transform .15s ease;position:relative}
+  #vt-root .o-row.dragging{transition:none;z-index:3;box-shadow:0 4px 16px rgba(0,0,0,.18);border-radius:10px}
+  #vt-root .o-handle{width:40px;height:40px;display:grid;place-items:center;color:var(--muted);cursor:grab;touch-action:none;flex:none}
+  #vt-root .o-row.dragging .o-handle{cursor:grabbing;color:var(--accent)}
   #vt-root .o-n{width:24px;height:24px;border-radius:12px;background:var(--soft);color:var(--accent);display:grid;place-items:center;font-size:13px;font-weight:700}
   #vt-root .o-name{flex:1;font-weight:600}
   #vt-root .sh-foot{margin-top:10px;border-top:1px solid var(--line);padding-top:4px}
@@ -1364,6 +1435,10 @@
     document.body.appendChild(root);
     root.addEventListener('click', onClick);
     root.addEventListener('submit', onSubmit);
+    root.addEventListener('pointerdown', onPointerDown);
+    root.addEventListener('pointermove', onPointerMove);
+    root.addEventListener('pointerup', onPointerUp);
+    root.addEventListener('pointercancel', onPointerUp);
     document.title = 'Vasketid';
     let meta = document.querySelector('meta[name=theme-color]');
     if (!meta) { meta = document.createElement('meta'); meta.name = 'theme-color'; document.head.appendChild(meta); }
