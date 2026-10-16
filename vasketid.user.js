@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.4.0
+// @version      0.4.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -407,7 +407,9 @@
         G = { type: 'Tørretumblere', machines: [] };
         L.groups.push(G);
       } else if (G && (m = /^(.{1,30}?)\s*\((.+)\)$/.exec(t))) {
-        G.machines.push({ name: m[1].replace(/^(Vask|Tør)(\d)/, '$1 $2'), state: m[2].trim() });
+        G.machines.push({ name: m[1].replace(/^(Vask|Tør)(\d)/, '$1 $2'), state: m[2].trim(), detail: '' });
+      } else if (G && G.machines.length && (m = /^(?:VASK|TØRRE|TØR)\s*\d+\s+(.+)$/i.exec(t))) {
+        G.machines[G.machines.length - 1].detail = m[1].trim();
       }
     }
     if (!laundries.length) throw new VtError('PARSE', pageMessage(page.doc) || 'Kunne ikke læse status');
@@ -930,6 +932,30 @@
     return 'run';
   }
 
+  // Minutter fra nu til et klokkeslæt i dag (håndterer midnat).
+  function minutesUntil(hm) {
+    const [h, m] = hm.split(':').map(Number);
+    const now = new Date();
+    let diff = h * 60 + m - (now.getHours() * 60 + now.getMinutes());
+    if (diff < -720) diff += 1440;
+    if (diff > 720) diff -= 1440;
+    return diff;
+  }
+
+  // Hvordan en maskine vises: kører den, er den færdig, eller bare ledig/reserveret.
+  function machineView(m) {
+    const d = m.detail || '';
+    let r;
+    if ((r = /Klar\s*ca\.?:?\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
+      const hm = r[1].replace('.', ':');
+      const left = minutesUntil(hm);
+      return { cls: 'run', label: 'Kører', sub: `klar ca. ${hm}${left > 0 ? ` · om ${left} min` : ' · snart færdig'}` };
+    }
+    const cls = stateClass(m.state);
+    if ((r = /Afsluttedes\s*(\d{1,2}[:.]\d{2})/i.exec(d))) return { cls, label: m.state, sub: `færdig ${r[1].replace('.', ':')}` };
+    return { cls, label: m.state, sub: d };
+  }
+
   function renderStatus() {
     let html = '';
     if (S.statusBusy) html += `<div class="note"><span class="spinner"></span>${esc(S.statusBusy)}</div>`;
@@ -938,12 +964,14 @@
       const order = ordered();
       const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 99 : i; };
       const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
-      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}. vasketur.dk viser lige nu kun ledig/reserveret – restid kommer frem her, hvis den bliver sendt igen.</p>`;
+      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
-          const free = g.machines.filter((m) => stateClass(m.state) === 'ok').length;
-          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige</span></div>
-            <div class="machines">${g.machines.map((m) => `<div class="mach ${stateClass(m.state)}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(m.state)}</div></div>`).join('')}</div></div>`;
+          const views = g.machines.map((m) => ({ m, v: machineView(m) }));
+          const free = views.filter((x) => x.v.cls === 'ok').length;
+          const busy = views.filter((x) => x.v.cls === 'run').length;
+          return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige${busy ? ` · ${busy} kører` : ''}</span></div>
+            <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub)}</div>` : ''}</div>`).join('')}</div></div>`;
         }).join('');
         html += `<section class="block card"><h2>${esc(L.name)}</h2>${groups}</section>`;
       }
@@ -1039,7 +1067,7 @@
     h += `<div class="order">${list.map((t, i) => `<div class="o-row"><span class="o-n">${i + 1}</span><span class="o-name">${esc(t)}</span>
       <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Flyt op">↑</button>
       <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="1" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Flyt ned">↓</button>
-      <button class="btn-icon" data-act="toggle-laundry" data-term="${esc(t)}" ${list.length === 1 ? 'disabled' : ''} aria-label="Fjern">✕</button></div>`).join('')}</div>`;
+      <button class="btn-rm" data-act="toggle-laundry" data-term="${esc(t)}" ${list.length === 1 ? 'disabled' : ''}>Fjern</button></div>`).join('')}</div>`;
     if (rest.length) {
       h += `<p class="muted small">Tilføj vaskeri:</p><div class="addrow">${rest.map((t) => `<button class="btn-ghost" data-act="toggle-laundry" data-term="${esc(t)}">+ ${esc(shortName(t))}</button>`).join('')}</div>`;
     }
@@ -1073,7 +1101,8 @@
     if (!sh) return '';
     const inner = sh.kind === 'book' ? renderBookSheet(sh) : sh.kind === 'cancel' ? renderCancelSheet(sh) : renderSettingsSheet();
     const canClose = !(sh.phase === 'booking' || sh.phase === 'cancelling');
-    return `<div class="backdrop" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet" role="dialog">${inner}</div>`;
+    const x = canClose ? '<button class="sh-close" data-act="close-sheet" aria-label="Luk">✕</button>' : '';
+    return `<div class="backdrop" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet" role="dialog">${x}${inner}</div>`;
   }
 
   let root;
@@ -1088,7 +1117,8 @@
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       main += S.tab === 'book' ? renderBook() : renderStatus();
     }
-    const scrollY = window.scrollY;
+    const scroller = root.querySelector('.scroll');
+    const scrollY = scroller ? scroller.scrollTop : 0;
     const daysEl = root.querySelector('.days');
     const daysX = daysEl ? daysEl.scrollLeft : null;
     root.innerHTML = `
@@ -1098,14 +1128,15 @@
           <button class="icon" data-act="settings" aria-label="Indstillinger">⚙</button>` : ''}</div>
         <div class="progress ${busy ? 'on' : ''}"></div>
       </header>
-      <main>${main}</main>
+      <div class="scroll"><main>${main}</main></div>
       ${S.view === 'app' ? `<nav>
-        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book"><span class="n-ic">📅</span>Book vask</button>
-        <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status"><span class="n-ic">🧺</span>Maskiner nu</button>
+        <button class="${S.tab === 'book' ? 'on' : ''}" data-act="tab" data-tab="book"><span class="n-ic">📅</span>Book</button>
+        <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status"><span class="n-ic">🧺</span>Status</button>
       </nav>` : ''}
       ${renderSheet()}
       ${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ''}`;
-    window.scrollTo(0, scrollY);
+    const sc = root.querySelector('.scroll');
+    if (sc) sc.scrollTop = scrollY;
     const newDays = root.querySelector('.days');
     if (newDays) {
       if (daysX != null) newDays.scrollLeft = daysX;
@@ -1125,7 +1156,7 @@
       case 'tab':
         S.tab = el.dataset.tab;
         store.set('tab3', S.tab);
-        window.scrollTo(0, 0);
+        { const sc = root.querySelector('.scroll'); if (sc) sc.scrollTop = 0; }
         render();
         if (S.tab === 'status' && (!S.status || Date.now() - S.status.at > 60000)) refreshStatus();
         break;
@@ -1168,12 +1199,12 @@
     --ok:#047857;--okbg:#d1fae5;--alt:#4d7c0f;--altbg:#ecfccb;--res:#92400e;--resbg:#fef3c7;--run:#1d4ed8;--runbg:#dbeafe;--err:#b91c1c;--errbg:#fee2e2;--shadow:0 1px 2px rgba(0,0,0,.06),0 1px 8px rgba(0,0,0,.04)}
   @media (prefers-color-scheme: dark){:root{--bg:#0d0f13;--card:#171a20;--fg:#eceef1;--muted:#9aa1ab;--line:#272b33;--accent:#5aa9ff;--accent-fg:#06121f;--soft:#14263b;
     --ok:#6ee7b7;--okbg:#0d3326;--alt:#bef264;--altbg:#1f2e0c;--res:#fcd34d;--resbg:#3a2c0a;--run:#93c5fd;--runbg:#132a4f;--err:#fca5a5;--errbg:#3f1515;--shadow:none}}
-  html,body{margin:0!important;padding:0!important;background:var(--bg)!important}
+  html,body{margin:0!important;padding:0!important;background:var(--bg)!important;height:100%!important;overflow:hidden!important;overscroll-behavior:none}
   body>*:not(#vt-root){display:none!important}
-  #vt-root{font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg);min-height:100vh;padding-bottom:calc(76px + env(safe-area-inset-bottom));-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+  #vt-root{font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg);position:fixed;inset:0;display:flex;flex-direction:column;overflow:hidden;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
   #vt-root *{box-sizing:border-box}
   #vt-root button{font:inherit;color:inherit;cursor:pointer}
-  #vt-root header{position:sticky;top:0;z-index:5;background:var(--bg)}
+  #vt-root header{flex:none;z-index:5;background:var(--bg)}
   #vt-root .h-row{display:flex;align-items:center;gap:4px;padding:12px 10px 10px 16px;max-width:640px;margin:0 auto}
   #vt-root h1{font-size:21px;margin:0;flex:1;letter-spacing:-.01em}
   #vt-root .icon{background:none;border:0;font-size:22px;width:44px;height:44px;border-radius:22px;color:var(--muted);display:grid;place-items:center}
@@ -1219,7 +1250,7 @@
   #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;justify-content:space-between}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
-  #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px}
+  #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
   #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)}
   #vt-root .note{display:flex;gap:10px;align-items:center;background:var(--soft);color:var(--accent);border-radius:12px;padding:12px;margin-bottom:12px;font-size:14px}
@@ -1236,10 +1267,13 @@
   #vt-root .btn-link{display:block;width:100%;background:none;border:0;color:var(--accent);padding:12px;font-size:15px}
   #vt-root .btn-icon{width:40px;height:40px;border:1px solid var(--line);background:var(--card);border-radius:10px;font-size:18px}
   #vt-root .btn-icon:disabled{opacity:.3}
+  #vt-root .btn-rm{height:40px;border:1px solid var(--line);background:var(--card);color:var(--err);border-radius:10px;padding:0 10px;font-size:14px;font-weight:600}
+  #vt-root .btn-rm:disabled{opacity:.3}
   #vt-root .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10;animation:vtfade .15s ease-out}
   #vt-root .sheet{position:fixed;left:0;right:0;bottom:0;z-index:11;background:var(--card);border-radius:22px 22px 0 0;padding:20px 18px calc(8px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto;max-height:90vh;overflow-y:auto;animation:vtup .18s ease-out}
   @keyframes vtup{from{transform:translateY(30px);opacity:.5}} @keyframes vtfade{from{opacity:0}}
-  #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:4px}
+  #vt-root .sh-title{font-size:20px;font-weight:700;margin-bottom:4px;padding-right:44px}
+  #vt-root .sh-close{position:absolute;top:12px;right:12px;width:40px;height:40px;border-radius:20px;border:0;background:var(--bg);color:var(--muted);font-size:18px;display:grid;place-items:center}
   #vt-root .seg-l{display:flex;gap:6px;overflow-x:auto;margin:12px 0 4px;scrollbar-width:none}
   #vt-root .seg-l button{flex:none;border:1px solid var(--line);background:var(--bg);border-radius:20px;padding:8px 14px;font-size:14px;font-weight:600}
   #vt-root .seg-l button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
@@ -1273,7 +1307,8 @@
   #vt-root .login input:not([type=checkbox]){display:block;width:100%;margin-top:4px;padding:13px;font-size:16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--fg)}
   #vt-root .login label.check{display:flex;gap:10px;align-items:center;color:var(--fg);font-size:15px}
   #vt-root .login input[type=checkbox]{width:20px;height:20px}
-  #vt-root nav{position:fixed;left:0;right:0;bottom:0;z-index:6;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+  #vt-root .scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  #vt-root nav{flex:none;z-index:6;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
   #vt-root nav button{flex:1;background:none;border:0;padding:8px 0 10px;font-size:13px;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px}
   #vt-root nav .n-ic{font-size:21px;filter:grayscale(1);opacity:.7}
   #vt-root nav button.on{color:var(--accent);font-weight:700} #vt-root nav button.on .n-ic{filter:none;opacity:1}
@@ -1328,7 +1363,7 @@
   }
 
   // Til test udefra (ingen effekt i normal brug).
-  window.__vasketid = { S, render: () => render(), refresh, slotsFor, bookingGroups, ordered };
+  window.__vasketid = { S, render: () => render(), refresh, slotsFor, bookingGroups, ordered, parseStatus, machineView };
 
   init();
 })();
