@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.7
+// @version      0.5.8
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -454,6 +454,8 @@
     cal: store.get('cal', {}), // "navn|uge" -> {days, cells, at}
     bookMap: store.get('bookMap', {}), // vaskeri -> [{key, cells, term}]
     bookingsAt: store.get('bookingsAt', null),
+    dayPlan: store.get('dayPlan', {}), // vaskeri -> {day, at, next: {maskinnr: 'HH:MM'}} – næste booking i dag pr. maskine
+    planBusy: false,
     status: store.get('status', null),
     loading: false,
     statusBusy: '',
@@ -472,6 +474,7 @@
     store.set('bookMap', S.bookMap);
     store.set('bookingsAt', S.bookingsAt);
     store.set('status', S.status);
+    store.set('dayPlan', S.dayPlan);
   }
 
   // Brugerens valgte vaskerier i prioriteret rækkefølge. Kun dem hentes og vises.
@@ -563,6 +566,66 @@
     return refreshing;
   }
 
+  const machineNo = (label) => (/(\d+)/.exec(label || '') || [])[1] || label;
+
+  // Går dagens resterende vasketider igennem for ét vaskeri og finder første booking pr. maskine.
+  // Åbner kun maskinvalget (som når man trykker Book) – der bookes ikke noget.
+  async function planDay(term, nums) {
+    const cal = await gotoCalendar(term, 0);
+    const parsed = parseCalendar(cal, 0);
+    S.cal[term + '|0'] = parsed;
+    const di = parsed.days.indexOf(dayTs(0));
+    const slots = parsed.cells.filter((c) => c.d === di && c.from && toMin(c.from) > nowMin())
+      .sort((a, b) => toMin(a.from) - toMin(b.from));
+    const next = {};
+    let page = cal;
+    for (const c of slots) {
+      if (nums.every((n) => next[n])) break;
+      if (!c.bookable) { // helt optaget: alle maskiner er booket her
+        nums.forEach((n) => { if (!next[n]) next[n] = c.from; });
+        break;
+      }
+      const mgPage = await postback(page, 'BookPass' + c.id, c.id);
+      let mg;
+      try { mg = parseMachineGroup(mgPage); } catch (e) { mg = { options: [] }; }
+      const offered = mg.options.map((o) => machineNo(o.label));
+      nums.forEach((n) => {
+        const o = mg.options.find((x) => machineNo(x.label) === n);
+        if (!next[n] && (!o ? offered.length > 0 : o.disabled)) next[n] = c.from;
+      });
+      const back = mgPage.doc.querySelector('input[name$="btMaskingruppBack"]');
+      page = back ? await activate(mgPage, back) : await gotoCalendar(term, 0);
+      ctx = { term, page: 'calendar', week: 0 };
+    }
+    return next;
+  }
+
+  async function refreshDayPlan() {
+    if (S.planBusy || !S.status) return;
+    const today = dayTs(0);
+    const todo = ordered().filter((t) => { const p = S.dayPlan[t]; return !p || p.day !== today || Date.now() - p.at > 5 * 60000; });
+    if (!todo.length) return;
+    S.planBusy = true;
+    render();
+    try {
+      for (const term of todo) {
+        const L = S.status.laundries.find((x) => sameLaundry(x.name, term));
+        const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
+        if (!G) continue;
+        const nums = G.machines.map((m) => machineNo(m.name));
+        const next = await serial(() => withSession(() => planDay(term, nums)));
+        S.dayPlan[term] = { day: today, at: Date.now(), next };
+        render();
+      }
+      saveCache();
+    } catch (e) {
+      // Ikke kritisk – status vises bare uden tidspunkter.
+    } finally {
+      S.planBusy = false;
+      render();
+    }
+  }
+
   async function refreshStatus() {
     if (S.statusBusy) return;
     S.statusError = '';
@@ -575,6 +638,7 @@
         S.statusBusy = '';
         saveCache();
         render();
+        refreshDayPlan();
         return;
       } catch (e) {
         last = e;
@@ -972,7 +1036,7 @@
 
   // Status svarer på ét spørgsmål: kan maskinen bruges lige nu?
   // "Reserveret" fra vasketur.dk betyder booket i den igangværende – eller, uden for vasketiderne, den næste – vasketid.
-  function machineView(m, bookable = true) {
+  function machineView(m, bookable = true, plan = null) {
     const d = m.detail || '';
     let r;
     if ((r = /Klar\s*ca\.?:?\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
@@ -990,13 +1054,13 @@
     if (cls === 'res') {
       const cur = passNow();
       if (cur) return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(cur[1])}` };
-      return { cls: 'ok', label: 'Ledig', sub: `til kl. ${shortTime(nextPass()[0])}` };
+      const nx = nextPass()[0];
+      return { cls: 'ok', label: 'Ledig', sub: toMin(nx) > nowMin() ? `til kl. ${shortTime(nx)}` : `til i morgen kl. ${shortTime(nx)}` };
     }
     if (cls === 'ok') {
-      if (!bookable) return { cls, label: 'Ledig', sub: '' };
-      // Ikke booket nu/næste gang: fri mindst til slutningen af den igangværende eller næste vasketid.
-      const until = (passNow() || nextPass())[1];
-      return { cls, label: 'Ledig', sub: `til mindst kl. ${shortTime(until)}` };
+      if (!bookable || !plan) return { cls, label: 'Ledig', sub: '' };
+      const at = plan.next[machineNo(m.name)];
+      return { cls, label: 'Ledig', sub: at ? `til kl. ${shortTime(at)}` : 'resten af dagen' };
     }
     return { cls, label: m.state, sub: last || d };
   }
@@ -1009,10 +1073,12 @@
       const order = ordered();
       const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 50 + hillRank(n) : i; };
       const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
-      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.</p>`;
+      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.${S.planBusy ? ' Henter dagens bookinger…' : ''}</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
-          const views = g.machines.map((m) => ({ m, v: machineView(m, !/tørre/i.test(g.type)) }));
+          const term = S.terms.find((t) => sameLaundry(t, L.name));
+          const plan = term && S.dayPlan[term] && S.dayPlan[term].day === dayTs(0) ? S.dayPlan[term] : null;
+          const views = g.machines.map((m) => ({ m, v: machineView(m, !/tørre/i.test(g.type), plan) }));
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige nu${busy ? ` · ${busy} i brug` : ''}</span></div>
