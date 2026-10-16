@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vasketid – plakat</title>
+<style>
+  @page{size:A4;margin:0}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:#fff;color:#111827;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .page{width:210mm;min-height:297mm;margin:0 auto;padding:22mm 20mm;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .kicker{font-size:15pt;color:#5b6472;margin:0}
+  h1{font-size:64pt;margin:4mm 0 2mm;letter-spacing:-.02em;color:#0a66c2}
+  .lead{font-size:20pt;margin:0 0 12mm;max-width:150mm;line-height:1.3}
+  ul{list-style:none;padding:0;margin:0 0 12mm;font-size:16pt;text-align:left;line-height:1.4}
+  li{margin:3mm 0;padding-left:10mm;position:relative}
+  li::before{content:"✓";position:absolute;left:0;color:#0a66c2;font-weight:700}
+  .qr{width:85mm;height:85mm;padding:4mm;border:1.5mm solid #0a66c2;border-radius:6mm;background:#fff}
+  .qr img{width:100%;height:100%;display:block}
+  .scan{font-size:18pt;font-weight:700;margin:8mm 0 2mm}
+  .url{font-size:14pt;color:#5b6472;margin:0}
+  .foot{margin-top:auto;font-size:11pt;color:#5b6472;max-width:160mm}
+  @media screen{body{background:#e5e7eb}.page{background:#fff;margin:16px auto;box-shadow:0 2px 12px rgba(0,0,0,.15)}}
+</style>
+</head>
+<body>
+<div class="page">
+  <p class="kicker">Til beboere i AB Mønten</p>
+  <h1>Vasketid</h1>
+  <p class="lead">Book vasketid på mobilen – nemmere end vasketur.dk</p>
+  <ul>
+    <li>Finder første ledige tid i dine foretrukne vaskerier</li>
+    <li>Book flere maskiner på én gang</li>
+    <li>Se hvilke maskiner der er ledige lige nu</li>
+  </ul>
+  <div class="qr"><img src="qr.svg" alt="QR-kode til bettelej.github.io/vasketid"></div>
+  <p class="scan">Scan og kom i gang</p>
+  <p class="url">bettelej.github.io/vasketid</p>
+  <p class="foot">Gratis og lavet af en beboer. Samme bookinger som vasketur.dk og skærmen i vaskekælderen. Ikke lavet af Electrolux eller vasketur.dk.</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vasketid – nemmere vaskebooking i AB Mønten</title>
+<meta name="description" content="Vasketid giver vasketur.dk et nyt, mobilvenligt udseende: find ledig tid i dine foretrukne vaskerier og book flere maskiner på én gang.">
+<style>
+  :root{--bg:#f3f4f6;--card:#fff;--fg:#111827;--muted:#5b6472;--line:#e5e7eb;--accent:#0a66c2;--accent-fg:#fff;--soft:#e8f1fb;--warn:#92400e;--warnbg:#fef3c7}
+  @media (prefers-color-scheme: dark){:root{--bg:#0d0f13;--card:#171a20;--fg:#eceef1;--muted:#a3aab4;--line:#272b33;--accent:#5aa9ff;--accent-fg:#06121f;--soft:#14263b;--warn:#fcd34d;--warnbg:#3a2c0a}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{max-width:680px;margin:0 auto;padding:24px 16px 48px}
+  h1{font-size:30px;line-height:1.15;margin:8px 0 8px;letter-spacing:-.02em}
+  h2{font-size:21px;margin:0 0 10px}
+  h3{font-size:17px;margin:18px 0 6px}
+  p{margin:0 0 12px}
+  .lead{font-size:19px;color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin:16px 0}
+  .tabs{display:flex;gap:8px;margin:20px 0 0}
+  .tabs a{flex:1;text-align:center;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);text-decoration:none;font-weight:600}
+  ol{padding-left:22px;margin:8px 0 12px} li{margin:6px 0}
+  .btn{display:block;text-align:center;background:var(--accent);color:var(--accent-fg);text-decoration:none;font-weight:700;padding:15px;border-radius:14px;margin:14px 0}
+  .btn.alt{background:var(--soft);color:var(--accent)}
+  .note{background:var(--warnbg);color:var(--warn);border-radius:12px;padding:12px 14px;font-size:15px}
+  .muted{color:var(--muted)} .small{font-size:14px}
+  ul.points{list-style:none;padding:0;margin:0} ul.points li{padding-left:28px;position:relative;margin:10px 0}
+  ul.points li::before{content:"✓";position:absolute;left:0;top:0;color:var(--accent);font-weight:700}
+  code{background:var(--soft);padding:1px 6px;border-radius:6px;font-size:15px}
+  footer{margin-top:28px;font-size:14px;color:var(--muted)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <p class="muted small">Til beboere i AB Mønten</p>
+  <h1>Vasketid</h1>
+  <p class="lead">Et nyt, mobilvenligt udseende til vaskebookingen på vasketur.dk.</p>
+
+  <div class="card">
+    <ul class="points">
+      <li>Vælg dine vaskerier i den rækkefølge, du foretrækker – appen finder første vaskeri med plads.</li>
+      <li>Book flere maskiner i samme tidsrum med ét tryk.</li>
+      <li>Se og afbestil dine tider samlet.</li>
+      <li>Se hvilke maskiner der er ledige lige nu.</li>
+    </ul>
+    <p class="small muted" style="margin-top:12px">Det er de samme bookinger som på den gamle side og skærmen i vaskekælderen – Vasketid er bare en pænere måde at se dem på.</p>
+  </div>
+
+  <h2>Kom i gang</h2>
+  <p>Det tager et par minutter første gang. Vælg din telefon:</p>
+  <div class="tabs"><a href="#android">Android</a><a href="#iphone">iPhone</a></div>
+
+  <div class="card" id="android">
+    <h2>Android</h2>
+    <ol>
+      <li>Installér <b>Firefox</b> fra Play Butik (hvis du ikke har den).</li>
+      <li>Åbn Firefox → menuen <b>⋮</b> → <b>Udvidelser</b> → find <b>Violentmonkey</b> → <b>Tilføj</b>.</li>
+      <li>Åbn denne side i Firefox og tryk på knappen herunder. Tryk <b>Installér</b>.</li>
+    </ol>
+    <a class="btn" href="vasketid.user.js">Installér Vasketid</a>
+    <ol start="4">
+      <li>Gå til <a href="https://web.vasketur.dk/DB0073/Default.aspx">web.vasketur.dk/DB0073</a> og log ind som du plejer.</li>
+      <li>Menu <b>⋮</b> → <b>Føj til startskærm</b>, så har du den som en app.</li>
+    </ol>
+  </div>
+
+  <div class="card" id="iphone">
+    <h2>iPhone</h2>
+    <ol>
+      <li>Hent den gratis app <b>Userscripts</b> i App Store, og åbn den én gang (vælg standardmappen).</li>
+      <li><b>Indstillinger → Apps → Safari → Udvidelser → Userscripts</b>: slå den til og tillad den på <i>web.vasketur.dk</i>. (Ældre iOS: Indstillinger → Safari → Udvidelser.)</li>
+      <li>Åbn denne side i <b>Safari</b>, tryk på knappen herunder, tryk derefter på <b>aA</b>/puslespilsikonet i adresselinjen → <b>Userscripts</b> → <b>Installér</b>.</li>
+    </ol>
+    <a class="btn" href="vasketid.user.js">Installér Vasketid</a>
+    <ol start="4">
+      <li>Gå til <a href="https://web.vasketur.dk/DB0073/Default.aspx">web.vasketur.dk/DB0073</a> i Safari og log ind.</li>
+    </ol>
+    <p class="note">Hjemmeskærm: slå <b>“Åbn som webapp”</b> fra, når du føjer siden til hjemmeskærmen – ellers kører Userscripts ikke, og du ser den gamle side. Et almindeligt bogmærke i Safari virker altid.</p>
+  </div>
+
+  <h2>Sikkerhed og privatliv</h2>
+  <div class="card">
+    <ul class="points">
+      <li>Dit login sendes kun til vasketur.dk – præcis som når du logger ind på den gamle side. Der er ingen server bag Vasketid.</li>
+      <li>“Husk mig” er slået fra som standard. Slår du det til, gemmes dit login kun i browseren på din egen telefon.</li>
+      <li>Vasketid kører kun på vasketur.dk-siderne og kan ikke se andre sider, apps eller data på din telefon.</li>
+      <li>Koden er åben og kan ses <a href="https://github.com/Bettelej/vasketid">på GitHub</a>.</li>
+    </ul>
+  </div>
+
+  <h2>Hvis noget driller</h2>
+  <div class="card">
+    <h3>Siden ser ud som før</h3>
+    <p>Tjek at Violentmonkey (Android) eller Userscripts (iPhone) er slået til, og at du bruger Firefox/Safari – ikke Chrome.</p>
+    <h3>Noget virker ikke</h3>
+    <p>Tryk <b>⚙</b> → <b>Åbn den gamle side</b>. Dine bookinger er de samme der. Vasketid kan holde op med at virke, hvis vasketur.dk ændrer deres side – så bliver det rettet hurtigst muligt.</p>
+    <h3>Opdateringer</h3>
+    <p>Kommer automatisk. Vil du have den nyeste med det samme, så tryk på knappen <a href="vasketid.user.js">Installér Vasketid</a> igen.</p>
+    <h3>Slet Vasketid igen</h3>
+    <p>Fjern scriptet i Violentmonkey/Userscripts. Så ser vasketur.dk ud som før.</p>
+  </div>
+
+  <footer>
+    <p>Vasketid er lavet af en beboer i fritiden og er gratis. Det er ikke lavet af Electrolux eller vasketur.dk, som ikke har noget ansvar for det.</p>
+    <p>Spørgsmål eller fejl? {{KONTAKT}}</p>
+  </footer>
+</main>
+</body>
+</html>

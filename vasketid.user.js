@@ -1,15 +1,16 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.3.0
+// @version      0.4.0
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
 // @inject-into  page
 // @run-at       document-end
 // @noframes
-// @downloadURL  https://gist.githubusercontent.com/NsoCarve/1366244bf78ebd9ff77d9d01fbed9ec9/raw/vasketid.user.js
-// @updateURL    https://gist.githubusercontent.com/NsoCarve/1366244bf78ebd9ff77d9d01fbed9ec9/raw/vasketid.user.js
+// @homepageURL  https://bettelej.github.io/vasketid/
+// @downloadURL  https://bettelej.github.io/vasketid/vasketid.user.js
+// @updateURL    https://bettelej.github.io/vasketid/vasketid.user.js
 // ==/UserScript==
 
 (function () {
@@ -21,8 +22,7 @@
   const WEEKDAYS_LONG = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
-  // Standard-rækkefølge (kan ændres under Indstillinger).
-  const DEFAULT_ORDER = ['Rytterbakken', 'Sokkelundsvej', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
+  const HELP_URL = 'https://bettelej.github.io/vasketid/';
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem(KEY + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -440,7 +440,8 @@
   const sameLaundry = (a, b) => !!a && !!b && norm(a) === norm(b);
 
   const S = {
-    view: 'loading', // loading | login | app
+    view: 'loading', // loading | login | setup | app
+    setupPick: [], // vaskerier valgt i førstegangsopsætningen
     tab: store.get('tab3', 'book'), // book | status
     order: store.get('order', null), // vaskerinavne i prioriteret rækkefølge
     count: store.get('count', 2), // antal maskiner man plejer at booke
@@ -469,19 +470,20 @@
     store.set('status', S.status);
   }
 
-  // Vaskerier i brugerens rækkefølge (nye/ukendte til sidst).
+  // Brugerens valgte vaskerier i prioriteret rækkefølge. Kun dem hentes og vises.
   function ordered() {
-    const order = S.order || DEFAULT_ORDER;
-    const rank = (t) => { const i = order.findIndex((o) => sameLaundry(o, t)); return i < 0 ? 99 : i; };
-    return [...S.terms].sort((a, b) => rank(a) - rank(b));
+    if (!S.order) return [];
+    return S.order.map((o) => S.terms.find((t) => sameLaundry(o, t))).filter(Boolean);
   }
+  const unselected = () => { const o = ordered(); return S.terms.filter((t) => !o.includes(t)); };
 
   function bookingDate(b) { const d = parseDanishDate(b.cells[0]); return d ? +d : null; }
 
   // Bookinger samlet pr. dag+tid+vaskeri: [{day, from, to, term, items:[booking]}]
   function bookingGroups() {
     const map = new Map();
-    for (const b of Object.values(S.bookMap).flat()) {
+    const mine = ordered();
+    for (const b of Object.values(S.bookMap).flat().filter((x) => mine.includes(x.term))) {
       const day = bookingDate(b);
       const k = `${day}|${b.cells[2]}|${b.term}`;
       if (!map.has(k)) map.set(k, { day, from: b.cells[2], to: b.cells[3], term: b.term, items: [] });
@@ -755,6 +757,31 @@
     render();
   }
 
+  function toggleLaundry(term) {
+    const list = ordered();
+    if (list.includes(term)) {
+      if (list.length === 1) return; // mindst ét vaskeri
+      S.order = list.filter((t) => t !== term).map(shortName);
+    } else {
+      S.order = [...list, term].map(shortName);
+    }
+    store.set('order', S.order);
+    render();
+    if (!list.includes(term)) refresh();
+  }
+
+  function pickSetup(term) {
+    S.setupPick = S.setupPick.includes(term) ? S.setupPick.filter((t) => t !== term) : [...S.setupPick, term];
+    render();
+  }
+
+  function finishSetup() {
+    if (!S.setupPick.length) return;
+    S.order = S.setupPick.map(shortName);
+    store.set('order', S.order);
+    startApp();
+  }
+
   function doLogin(form) {
     const user = form.user.value.trim();
     const pass = form.pass.value;
@@ -790,6 +817,12 @@
   }
 
   function startApp() {
+    if (!S.order || !S.order.length) {
+      S.view = 'setup';
+      render();
+      loadTerms().then(render, handleError);
+      return;
+    }
     S.view = 'app';
     render();
     refresh();
@@ -928,7 +961,7 @@
       <form data-form="login">
         <label>Navn<input name="user" autocomplete="username" inputmode="numeric" value="${esc(c ? c.user : '')}"></label>
         <label>Adgangskode<input name="pass" type="password" autocomplete="current-password"></label>
-        <label class="check"><input name="remember" type="checkbox" checked> Husk mig på denne telefon</label>
+        <label class="check"><input name="remember" type="checkbox" ${c ? 'checked' : ''}> Husk mig på denne telefon</label>
         <button class="btn-primary" type="submit" ${S.loggingIn ? 'disabled' : ''}>${S.loggingIn ? 'Logger ind…' : 'Log ind'}</button>
       </form>
       ${S.error ? `<div class="alert">${esc(S.error)}</div>` : ''}
@@ -1001,16 +1034,38 @@
 
   function renderSettingsSheet() {
     const list = ordered();
-    let h = '<div class="sh-title">Indstillinger</div><p class="muted small">Rækkefølge: appen foreslår altid det øverste vaskeri med plads.</p>';
+    const rest = unselected();
+    let h = '<div class="sh-title">Indstillinger</div><p class="muted small">Dine vaskerier – appen foreslår altid det øverste med plads.</p>';
     h += `<div class="order">${list.map((t, i) => `<div class="o-row"><span class="o-n">${i + 1}</span><span class="o-name">${esc(t)}</span>
       <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Flyt op">↑</button>
-      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="1" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Flyt ned">↓</button></div>`).join('')}</div>`;
+      <button class="btn-icon" data-act="move" data-term="${esc(t)}" data-d="1" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Flyt ned">↓</button>
+      <button class="btn-icon" data-act="toggle-laundry" data-term="${esc(t)}" ${list.length === 1 ? 'disabled' : ''} aria-label="Fjern">✕</button></div>`).join('')}</div>`;
+    if (rest.length) {
+      h += `<p class="muted small">Tilføj vaskeri:</p><div class="addrow">${rest.map((t) => `<button class="btn-ghost" data-act="toggle-laundry" data-term="${esc(t)}">+ ${esc(shortName(t))}</button>`).join('')}</div>`;
+    }
     h += `<div class="countrow"><span>Antal maskiner jeg plejer at booke</span><span class="stepper"><button data-act="count" data-d="-1">−</button><b>${S.count}</b><button data-act="count" data-d="1">+</button></span></div>`;
     h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
-    h += '<div class="sh-foot"><button class="btn-link small" data-act="original">Åbn den gamle side</button>';
+    h += `<div class="sh-foot"><a class="btn-link small" href="${HELP_URL}" target="_blank" rel="noopener">Hjælp og vejledning</a><button class="btn-link small" data-act="original">Åbn den gamle side</button>`;
     if (creds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
     h += '</div>';
     return h;
+  }
+
+  function renderSetup() {
+    const list = S.terms.length
+      ? S.terms.map((t) => {
+        const n = S.setupPick.indexOf(t) + 1;
+        return `<button class="pick ${n ? 'on' : ''}" data-act="pick" data-term="${esc(t)}"><span class="o-n">${n || ''}</span>${esc(t)}</button>`;
+      }).join('')
+      : '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    const n = S.setupPick.length;
+    return `<section class="block">
+      <h2>Velkommen til Vasketid</h2>
+      <p><b>Hvilke vaskerier bruger du?</b><br><span class="muted">Tryk på dem i den rækkefølge, du foretrækker. Appen foreslår altid nr. 1 først og går videre til nr. 2, hvis der er fuldt.</span></p>
+      ${list}
+      <button class="btn-primary big" data-act="setup-done" ${n ? '' : 'disabled'}>${n ? 'Fortsæt' : 'Vælg mindst ét vaskeri'}</button>
+      <p class="muted small center">Du kan altid ændre det under ⚙.</p>
+    </section>`;
   }
 
   function renderSheet() {
@@ -1028,6 +1083,7 @@
     let main = '';
     if (S.view === 'loading') main = '<div class="skeleton"></div><div class="skeleton"></div>';
     else if (S.view === 'login') main = renderLogin();
+    else if (S.view === 'setup') main = renderSetup();
     else {
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       main += S.tab === 'book' ? renderBook() : renderStatus();
@@ -1089,6 +1145,9 @@
       case 'toggle-cancel': toggleCancel(el.dataset.key); break;
       case 'do-cancel': doCancel(); break;
       case 'move': moveOrder(el.dataset.term, +el.dataset.d); break;
+      case 'toggle-laundry': toggleLaundry(el.dataset.term); break;
+      case 'pick': pickSetup(el.dataset.term); break;
+      case 'setup-done': finishSetup(); break;
       case 'forget': doForget(); break;
       case 'original':
         session.set('off', '1');
@@ -1198,6 +1257,12 @@
   #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none;display:inline-block}
   #vt-root .success{text-align:center;font-size:18px;font-weight:700;color:var(--ok);padding:14px 0 4px}
   #vt-root .big-check{width:56px;height:56px;border-radius:28px;background:var(--okbg);display:grid;place-items:center;margin:0 auto 10px;font-size:30px}
+  #vt-root .pick{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;font-size:17px;font-weight:600;margin-bottom:8px}
+  #vt-root .pick .o-n{background:var(--bg);border:1px solid var(--line);flex:none}
+  #vt-root .pick.on{border-color:var(--accent);background:var(--soft)}
+  #vt-root .pick.on .o-n{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+  #vt-root .addrow{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+  #vt-root .sh-foot a.btn-link{text-align:center;text-decoration:none}
   #vt-root .order{margin:10px 0}
   #vt-root .o-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
   #vt-root .o-n{width:24px;height:24px;border-radius:12px;background:var(--soft);color:var(--accent);display:grid;place-items:center;font-size:13px;font-weight:700}
