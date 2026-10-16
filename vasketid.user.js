@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.9
+// @version      0.7.0
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -456,6 +456,7 @@
     bookingsAt: store.get('bookingsAt', null),
     dayPlan: store.get('dayPlan', {}), // vaskeri -> {day, at, next: {maskinnr: 'HH:MM'}} – næste booking i dag pr. maskine
     planBusy: false,
+    mineSel: [], // markerede tider på Mine (gruppenøgler)
     status: store.get('status', null),
     loading: false,
     statusBusy: '',
@@ -805,8 +806,15 @@
   }
 
   function askCancelAll() {
-    const groups = bookingGroups();
-    if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups }; render(); }
+    const all = bookingGroups();
+    const picked = all.filter((g) => S.mineSel.includes(groupKey(g)));
+    const groups = picked.length ? picked : all;
+    if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups, partial: picked.length > 0 && picked.length < all.length }; render(); }
+  }
+
+  function toggleMine(k) {
+    S.mineSel = S.mineSel.includes(k) ? S.mineSel.filter((x) => x !== k) : [...S.mineSel, k];
+    render();
   }
 
   // Afbestiller alle grupper, samlet pr. vaskeri (ét serverbesøg pr. vaskeri).
@@ -835,7 +843,8 @@
         S.sheet = { ...sh, phase: 'error', msg: `${failed} af ${total} kunne ikke afbestilles. Prøv igen.` };
       } else {
         S.sheet = null;
-        toast(`${total} maskiner afbestilt`);
+        S.mineSel = [];
+        toast(`${total} maskine${total === 1 ? '' : 'r'} afbestilt`);
       }
       render();
       for (const term of byTerm.keys()) loadCalendar(term, 0).then(saveCache, () => {});
@@ -1022,10 +1031,13 @@
     return labels.join(', ');
   };
 
+  const groupKey = (g) => `${g.day}|${g.from}|${g.term}`;
+
   function renderBookings() {
     const groups = bookingGroups();
     if (!groups.length) return S.bookingsAt ? '<p class="muted small">Du har ingen vasketider booket.</p>' : '';
-    return groups.map((g, i) => `<div class="mybook">
+    return groups.map((g, i) => `<div class="mybook ${S.mineSel.includes(groupKey(g)) ? 'sel' : ''}">
+        <button class="mb-check" data-act="mine-toggle" data-k="${esc(groupKey(g))}" aria-label="Markér">${S.mineSel.includes(groupKey(g)) ? '✓' : ''}</button>
         <div class="mb-main">
           <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
           <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</div>
@@ -1104,9 +1116,14 @@
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
     const groups = bookingGroups();
-    const all = groups.length > 1
-      ? `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${groups.reduce((n, g) => n + g.items.length, 0)} maskiner)</button>`
-      : '';
+    S.mineSel = S.mineSel.filter((k) => groups.some((g) => groupKey(g) === k)); // glem markeringer for tider, der er væk
+    const picked = groups.filter((g) => S.mineSel.includes(groupKey(g)));
+    const count = (gs) => gs.reduce((n, g) => n + g.items.length, 0);
+    const all = picked.length
+      ? `<button class="btn-danger wide-danger" data-act="cancel-all">Afbestil valgte (${count(picked)} maskine${count(picked) === 1 ? '' : 'r'})</button>`
+      : groups.length > 1
+        ? `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${count(groups)} maskiner)</button>`
+        : '';
     return `<section class="block">${all}${list}</section>`;
   }
 
@@ -1263,9 +1280,9 @@
 
   function renderCancelAllSheet(sh) {
     const n = sh.groups.reduce((x, g) => x + g.items.length, 0);
-    let h = '<div class="sh-title">Afbestil alle vasketider?</div>';
+    let h = `<div class="sh-title">${sh.partial ? 'Afbestil valgte vasketider?' : 'Afbestil alle vasketider?'}</div>`;
     h += `<div class="cl-list">${sh.groups.map((g) => `<div>${esc(fullDay(g.day))} kl. ${esc(span(g.from, g.to))} · ${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</div>`).join('')}</div>`;
-    if (sh.phase === 'confirm') h += `<button class="btn-danger big" data-act="do-cancel-all">Ja, afbestil alle ${n} maskiner</button><button class="btn-link" data-act="close-sheet">Nej, behold dem</button>`;
+    if (sh.phase === 'confirm') h += `<button class="btn-danger big" data-act="do-cancel-all">Ja, afbestil ${sh.partial ? '' : 'alle '}${n} maskine${n === 1 ? '' : 'r'}</button><button class="btn-link" data-act="close-sheet">Nej, behold dem</button>`;
     if (sh.phase === 'cancelling') h += '<div class="sh-wait"><span class="spinner"></span>Afbestiller…</div>';
     if (sh.phase === 'error') h += `<div class="alert">${esc(sh.msg)}</div><button class="btn-primary" data-act="close-sheet">OK</button>`;
     return h;
@@ -1483,6 +1500,7 @@
       case 'toggle-cancel': toggleCancel(el.dataset.key); break;
       case 'do-cancel': doCancel(); break;
       case 'cancel-all': askCancelAll(); break;
+      case 'mine-toggle': toggleMine(el.dataset.k); break;
       case 'do-cancel-all': doCancelAll(); break;
       case 'move': moveOrder(el.dataset.term, +el.dataset.d); break;
       case 'toggle-laundry': toggleLaundry(el.dataset.term); break;
@@ -1530,6 +1548,9 @@
   #vt-root .muted{color:var(--muted)} #vt-root .small{font-size:13px} #vt-root .center{text-align:center}
   #vt-root .empty{color:var(--muted);text-align:center;padding:28px 0}
   #vt-root .mybook{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
+  #vt-root .mb-check{width:28px;height:28px;border-radius:14px;border:2px solid var(--line);background:var(--card);color:var(--accent-fg);font-weight:700;font-size:15px;flex:none;display:grid;place-items:center;padding:0}
+  #vt-root .mybook.sel{border-color:var(--err);border-left-color:var(--err)} #vt-root .mybook.sel .mb-check{background:var(--err);border-color:var(--err);color:#fff}
+  #vt-root .btn-danger.wide-danger{margin:0 0 10px;padding:12px;font-size:15px}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
   #vt-root .book-block{margin-top:0}
   #vt-root .daybar{position:sticky;top:0;z-index:4;background:var(--bg);margin:-8px -16px 0;padding:8px 16px 6px;border-bottom:1px solid var(--line)}
