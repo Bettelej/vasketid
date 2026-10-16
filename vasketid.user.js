@@ -8,6 +8,8 @@
 // @inject-into  page
 // @run-at       document-end
 // @noframes
+// @downloadURL  https://gist.githubusercontent.com/NsoCarve/1366244bf78ebd9ff77d9d01fbed9ec9/raw/vasketid.user.js
+// @updateURL    https://gist.githubusercontent.com/NsoCarve/1366244bf78ebd9ff77d9d01fbed9ec9/raw/vasketid.user.js
 // ==/UserScript==
 
 (function () {
