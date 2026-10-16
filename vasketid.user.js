@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.5.5
+// @version      0.5.6
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -910,7 +910,7 @@
         const others = free.slice(1).map((i) => shortName(i.term));
         const sub = best === top
           ? (others.length ? `Også: ${others.join(', ')}` : 'Kun ledig her')
-          : `${shortName(top)} er optaget${others.length ? ` · også: ${others.join(', ')}` : ''}`;
+          : `${shortName(top)} optaget${others.length ? ` · også: ${others.join(', ')}` : ''}`;
         return `<button class="slot free ${best === top ? '' : 'alt'}" data-act="book" data-from="${esc(s.from)}" data-ts="${day}">${t}
           <span class="s-main"><b>${esc(shortName(best))}</b><small>${esc(sub)}</small></span><span class="s-cta">Book</span></button>`;
       }).join('');
@@ -1011,7 +1011,7 @@
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${free} af ${g.machines.length} ledige nu${busy ? ` · ${busy} i brug` : ''}</span></div>
-            <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub)}</div>` : ''}</div>`).join('')}</div></div>`;
+            <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub).replace(/ · /g, '<br>')}</div>` : ''}</div>`).join('')}</div></div>`;
         }).join('');
         // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
         const name = S.terms.find((t) => sameLaundry(t, L.name)) || L.name;
@@ -1063,7 +1063,7 @@
           h += `<div class="hint">Kun ${free.length} ledig${free.length === 1 ? '' : 'e'} her.${next ? ` <button class="btn-inline" data-act="probe" data-i="${sh.idx + 1}">Se ${esc(shortName(next.term))}</button>` : ''}</div>`;
         }
         const n = sh.sel.length;
-        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? sh.sel[0] : `${n} maskiner`} på ${esc(shortName(c.term))}` : 'Vælg mindst én maskine'}</button>`;
+        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}` : 'Vælg mindst én maskine'}</button>`;
         if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere i alt.</div>`;
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
@@ -1349,21 +1349,21 @@
   #vt-root .dayb.on .d-dot{background:var(--accent-fg)}
   #vt-root .dayhead{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:17px;margin:6px 0 8px}
   #vt-root .slots{display:flex;flex-direction:column;gap:8px}
-  #vt-root .slot{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border-radius:14px;padding:12px 12px 12px 14px;border:1px solid var(--line);background:var(--card);min-height:62px}
-  #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:70px;flex:none}
+  #vt-root .slot{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border-radius:14px;padding:10px 10px 10px 12px;border:1px solid var(--line);background:var(--card);min-height:62px}
+  #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:66px;flex:none;white-space:nowrap}
   #vt-root .s-time small{font-size:14px;font-weight:500;opacity:.7}
   #vt-root .s-main{flex:1;min-width:0;display:flex;flex-direction:column}
-  #vt-root .s-main b{font-size:16px} #vt-root .s-main small{font-size:13px;opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #vt-root .s-main b{font-size:16px;overflow-wrap:anywhere} #vt-root .s-main small{font-size:13px;opacity:.8;line-height:1.3}
   #vt-root .slot.free{border-color:transparent;background:var(--okbg);color:var(--ok)}
   #vt-root .slot.free.alt{background:var(--altbg);color:var(--alt)}
-  #vt-root .s-cta{background:currentColor;border-radius:10px;padding:8px 16px;font-size:15px;font-weight:700;flex:none}
+  #vt-root .s-cta{background:currentColor;border-radius:10px;padding:8px 12px;font-size:15px;font-weight:700;flex:none}
   #vt-root .s-cta{color:var(--card)} #vt-root .slot.free .s-cta{background:var(--ok)} #vt-root .slot.free.alt .s-cta{background:var(--alt)}
   #vt-root .slot.taken{background:transparent;color:var(--muted)}
   #vt-root .slot.mine{background:var(--soft);border-color:var(--accent);color:var(--accent)}
   #vt-root .s-ok{width:32px;height:32px;border-radius:16px;background:var(--accent);color:var(--accent-fg);display:grid;place-items:center;font-weight:700;flex:none}
   #vt-root .skeleton{height:62px;border-radius:14px;background:linear-gradient(90deg,var(--line),var(--card),var(--line));background-size:200% 100%;animation:vtsk 1.2s ease-in-out infinite;margin-bottom:8px}
   @keyframes vtsk{from{background-position:100% 0}to{background-position:-100% 0}}
-  #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;justify-content:space-between}
+  #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:0 8px} #vt-root .grp-h span{white-space:nowrap}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
@@ -1400,7 +1400,7 @@
   #vt-root .stepper{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:12px;padding:2px}
   #vt-root .stepper button{width:40px;height:36px;border:0;background:none;font-size:20px;border-radius:10px}
   #vt-root .stepper b{min-width:22px;text-align:center;font-size:17px}
-  #vt-root .mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px;margin:8px 0}
+  #vt-root .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(62px,1fr));gap:8px;margin:8px 0}
   #vt-root .mbtn{border:2px solid var(--line);background:var(--card);border-radius:14px;padding:12px 6px;font-weight:700;font-size:15px;display:flex;flex-direction:column;align-items:center;gap:2px}
   #vt-root .mbtn small{font-weight:500;font-size:12px;color:var(--muted)}
   #vt-root .mbtn.on{border-color:var(--ok);background:var(--okbg);color:var(--ok)} #vt-root .mbtn.on small{color:var(--ok)}
