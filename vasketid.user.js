@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.7
+// @version      0.6.8
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -241,7 +241,7 @@
     return [...page.doc.querySelectorAll('[name*="DataGridBookings"], a[href*="DataGridBookings"]')].map((el) => {
       const tr = el.closest('tr');
       const cells = tr
-        ? [...tr.cells].map((c) => c.textContent.replace(/\s+/g, ' ').trim()).filter((t) => t && t !== '-' && !/^Afbestil/i.test(t))
+        ? [...tr.cells].map((c) => c.textContent.replace(/\s+/g, ' ').trim().replace(/^(Vask|Tør)(\d)/i, '$1 $2')).filter((t) => t && t !== '-' && !/^Afbestil/i.test(t))
         : [];
       const id = el.getAttribute('name') || (parsePostback(el.getAttribute('href')) || {}).target;
       return { key: cells.join(' | '), cells, id };
@@ -321,7 +321,7 @@
     const t = texts(page.doc).join(' ');
     const quota = (/Du har (\d+) bestillinger tilbage/i.exec(t) || [])[1];
     const options = [...page.doc.querySelectorAll('input[name*="bt2Maskingrupp"]')]
-      .map((e) => ({ name: e.name, label: e.value.trim(), disabled: e.disabled || /aspNetDisabled/.test(e.className) }));
+      .map((e) => ({ name: e.name, label: e.value.trim().replace(/^(Vask|Tør)(\d)/i, '$1 $2'), disabled: e.disabled || /aspNetDisabled/.test(e.className) }));
     const rnd = page.doc.querySelector('input[name$="btMaskingruppRandom"]');
     if (!options.length && !rnd) throw new VtError('BOOK', pageMessage(page.doc) || 'Ingen ledige maskiner');
     return { page, quota: quota != null ? +quota : null, options, random: rnd ? { name: rnd.name } : null };
@@ -693,7 +693,9 @@
   function openBooking(fromKey, ts) {
     const slot = slotsFor(ts).find((s) => s.from === fromKey);
     if (!slot) return;
-    const cands = slot.items.filter((i) => i.cell.bookable).map((i) => ({ term: i.term, cellId: i.cell.id }));
+    const ownTerms = slot.own.map((g) => g.term);
+    const cands = slot.items.filter((i) => i.cell.bookable).map((i) => ({ term: i.term, cellId: i.cell.id }))
+      .sort((a, b) => (ownTerms.includes(b.term) ? 1 : 0) - (ownTerms.includes(a.term) ? 1 : 0));
     if (!cands.length) return;
     S.sheet = { kind: 'book', phase: 'choose', day: ts, from: slot.from, to: slot.to, week: slot.week, cands, idx: 0, probes: {}, sel: [] };
     render();
@@ -728,11 +730,18 @@
 
   function freeLabels(mg) { return mg.options.filter((o) => !o.disabled).map((o) => o.label); }
 
+  // Dine egne maskiner i bookingvinduets tidsrum og vaskeri.
+  function ownMachines(sh, term) {
+    const g = bookingGroups().find((x) => x.day === sh.day && x.from === sh.from && x.term === term);
+    return g ? g.items.map((b) => machineNo(b.cells[1])) : [];
+  }
+
   function preselect() {
     const sh = S.sheet;
     const p = sh.probes[sh.cands[sh.idx].term];
     if (!p || p.state !== 'ok') { sh.sel = []; return; }
-    sh.sel = freeLabels(p.mg).slice(0, S.count);
+    const own = ownMachines(sh, sh.cands[sh.idx].term).length;
+    sh.sel = own ? [] : freeLabels(p.mg).slice(0, S.count);
   }
 
   function toggleMachine(label) {
@@ -793,6 +802,48 @@
     if (!sh || sh.kind !== 'cancel' || sh.phase !== 'confirm') return;
     sh.sel = sh.sel.includes(key) ? sh.sel.filter((k) => k !== key) : [...sh.sel, key];
     render();
+  }
+
+  function askCancelAll() {
+    const groups = bookingGroups();
+    if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups }; render(); }
+  }
+
+  // Afbestiller alle grupper, samlet pr. vaskeri (ét serverbesøg pr. vaskeri).
+  function doCancelAll() {
+    const sh = S.sheet;
+    if (!sh || sh.kind !== 'cancelall' || sh.phase !== 'confirm') return;
+    sh.phase = 'cancelling';
+    render();
+    const byTerm = new Map();
+    for (const g of sh.groups) {
+      if (!byTerm.has(g.term)) byTerm.set(g.term, []);
+      byTerm.get(g.term).push(...g.items.map((b) => b.key));
+    }
+    const total = [...byTerm.values()].reduce((n, k) => n + k.length, 0);
+    serial(() => withSession(async () => {
+      let failed = 0;
+      for (const [term, keys] of byTerm) {
+        const res = await cancelMany(term, keys);
+        S.bookMap[term] = res.after.map((x) => ({ ...x, term }));
+        failed += res.failed.length;
+      }
+      return failed;
+    }), true).then((failed) => {
+      saveCache();
+      if (failed) {
+        S.sheet = { ...sh, phase: 'error', msg: `${failed} af ${total} kunne ikke afbestilles. Prøv igen.` };
+      } else {
+        S.sheet = null;
+        toast(`${total} maskiner afbestilt`);
+      }
+      render();
+      for (const term of byTerm.keys()) loadCalendar(term, 0).then(saveCache, () => {});
+    }, (e) => {
+      if (e.code === 'LOGIN' && !creds()) { S.sheet = null; handleError(e); return; }
+      S.sheet = { ...sh, phase: 'error', msg: e.message };
+      render();
+    });
   }
 
   function doCancel() {
@@ -1011,7 +1062,10 @@
         const t = `<span class="s-time">${esc(shortTime(s.from))}<small>–${esc(shortTime(s.to))}</small></span>`;
         if (s.own.length) {
           const g = s.own[0];
-          return `<div class="slot mine">${t}<span class="s-main"><b>Din tid</b><small>${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</small></span><span class="s-ok">✓</span></div>`;
+          const info = `<span class="s-main"><b>Din tid</b><small>${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</small></span>`;
+          return s.items.some((i) => i.cell.bookable)
+            ? `<button class="slot mine" data-act="book" data-from="${esc(s.from)}" data-ts="${day}">${t}${info}<span class="s-more">+ Book flere</span></button>`
+            : `<div class="slot mine">${t}${info}<span class="s-ok">✓</span></div>`;
         }
         const free = s.items.filter((i) => i.cell.bookable);
         if (!free.length) return `<div class="slot taken">${t}<span class="s-main">Alt optaget</span></div>`;
@@ -1049,7 +1103,11 @@
       return `<section class="block">${list}
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
-    return `<section class="block">${list}</section>`;
+    const groups = bookingGroups();
+    const all = groups.length > 1
+      ? `<button class="btn-ghost danger wide" data-act="cancel-all">Afbestil alle (${groups.reduce((n, g) => n + g.items.length, 0)} maskiner)</button>`
+      : '';
+    return `<section class="block">${list}${all}</section>`;
   }
 
   function stateClass(s) {
@@ -1178,12 +1236,14 @@
         if (sh.idx + 1 < sh.cands.length) h += `<button class="btn-ghost wide" data-act="probe" data-i="${sh.idx + 1}">Prøv ${esc(shortName(sh.cands[sh.idx + 1].term))}</button>`;
       } else if (p.state === 'ok') {
         const free = freeLabels(p.mg);
+        const mine = ownMachines(sh, c.term);
         h += `<div class="mgrid">${p.mg.options.map((o) => {
           const on = sh.sel.includes(o.label);
-          return `<button class="mbtn ${on ? 'on' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
+          const isMine = o.disabled && mine.includes(machineNo(o.label));
+          return `<button class="mbtn ${on ? 'on' : ''} ${isMine ? 'own' : ''}" data-act="machine" data-label="${esc(o.label)}" ${o.disabled ? 'disabled' : ''}>${esc(o.label)}<small>${isMine ? 'din' : o.disabled ? 'optaget' : on ? 'valgt' : 'ledig'}</small></button>`;
         }).join('')}</div>`;
         const n = sh.sel.length;
-        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}` : 'Vælg mindst én maskine'}</button>`;
+        h += `<button class="btn-primary big" data-act="do-book" ${n ? '' : 'disabled'}>${n ? `Book ${n === 1 ? esc(sh.sel[0]) : `${n} maskiner`}` : (ownMachines(sh, c.term).length ? 'Vælg flere maskiner' : 'Vælg mindst én maskine')}</button>`;
         if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere i alt.</div>`;
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
@@ -1198,6 +1258,16 @@
       if (r.left != null) h += `<div class="muted small center">Du kan booke ${r.left} maskine${r.left === 1 ? '' : 'r'} mere i alt.</div>`;
       h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
     }
+    return h;
+  }
+
+  function renderCancelAllSheet(sh) {
+    const n = sh.groups.reduce((x, g) => x + g.items.length, 0);
+    let h = '<div class="sh-title">Afbestil alle vasketider?</div>';
+    h += `<div class="cl-list">${sh.groups.map((g) => `<div>${esc(fullDay(g.day))} kl. ${esc(span(g.from, g.to))} · ${esc(shortName(g.term))} · ${esc(machineList(g.items.map((b) => b.cells[1])))}</div>`).join('')}</div>`;
+    if (sh.phase === 'confirm') h += `<button class="btn-danger big" data-act="do-cancel-all">Ja, afbestil alle ${n} maskiner</button><button class="btn-link" data-act="close-sheet">Nej, behold dem</button>`;
+    if (sh.phase === 'cancelling') h += '<div class="sh-wait"><span class="spinner"></span>Afbestiller…</div>';
+    if (sh.phase === 'error') h += `<div class="alert">${esc(sh.msg)}</div><button class="btn-primary" data-act="close-sheet">OK</button>`;
     return h;
   }
 
@@ -1260,7 +1330,7 @@
     const sh = S.sheet;
     if (!sh) return '';
     const anim = opening ? ' anim' : '';
-    const inner = sh.kind === 'book' ? renderBookSheet(sh) : sh.kind === 'cancel' ? renderCancelSheet(sh) : renderSettingsSheet();
+    const inner = sh.kind === 'book' ? renderBookSheet(sh) : sh.kind === 'cancel' ? renderCancelSheet(sh) : sh.kind === 'cancelall' ? renderCancelAllSheet(sh) : renderSettingsSheet();
     const canClose = !(sh.phase === 'booking' || sh.phase === 'cancelling');
     const x = canClose ? '<button class="sh-close" data-act="close-sheet" aria-label="Luk">✕</button>' : '';
     return `<div class="backdrop${anim}" ${canClose ? 'data-act="close-sheet"' : ''}></div><div class="sheet${anim}" role="dialog">${x}${inner}</div>`;
@@ -1412,6 +1482,8 @@
       case 'cancel': askCancel(+el.dataset.i); break;
       case 'toggle-cancel': toggleCancel(el.dataset.key); break;
       case 'do-cancel': doCancel(); break;
+      case 'cancel-all': askCancelAll(); break;
+      case 'do-cancel-all': doCancelAll(); break;
       case 'move': moveOrder(el.dataset.term, +el.dataset.d); break;
       case 'toggle-laundry': toggleLaundry(el.dataset.term); break;
       case 'pick': pickSetup(el.dataset.term); break;
@@ -1510,6 +1582,7 @@
   #vt-root .big{padding:17px;font-size:17px}
   #vt-root .btn-ghost{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 14px;font-weight:600;font-size:14px;flex:none}
   #vt-root .btn-ghost.wide{width:100%;margin-top:6px}
+  #vt-root .cl-list{margin:10px 0;font-size:14px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
   #vt-root .btn-ghost.danger{color:var(--err)}
   #vt-root .btn-link{display:block;width:100%;background:none;border:0;color:var(--accent);padding:12px;font-size:15px}
   #vt-root .btn-icon{width:40px;height:40px;border:1px solid var(--line);background:var(--card);border-radius:10px;font-size:18px}
@@ -1537,6 +1610,8 @@
   #vt-root .mbtn.on{border-color:var(--ok);background:var(--okbg);color:var(--ok)} #vt-root .mbtn.on small{color:var(--ok)}
   #vt-root .mbtn.danger.on{border-color:var(--err);background:var(--errbg);color:var(--err)} #vt-root .mbtn.danger.on small{color:var(--err)}
   #vt-root .mbtn:disabled{opacity:.4;text-decoration:line-through}
+  #vt-root .mbtn.own:disabled{opacity:1;text-decoration:none;border-color:var(--accent);background:var(--soft);color:var(--accent)} #vt-root .mbtn.own small{color:var(--accent)}
+  #vt-root .s-more{border:1px solid var(--accent);color:var(--accent);border-radius:10px;padding:7px 10px;font-size:13px;font-weight:700;flex:none;white-space:nowrap}
   #vt-root .sh-wait{display:flex;align-items:center;gap:10px;color:var(--muted);padding:22px 0}
   #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none;display:inline-block}
   #vt-root .success{text-align:center;font-size:18px;font-weight:700;color:var(--ok);padding:14px 0 4px}
