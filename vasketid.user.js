@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.0
+// @version      0.6.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -1045,7 +1045,7 @@
     if ((r = /Klar\s*ca\.?:?\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
       const hm = r[1].replace('.', ':');
       const left = minutesUntil(hm);
-      return { cls: 'run', label: 'I brug', sub: `klar ca. ${hm}${left > 0 ? ` · om ${left} min` : ' · snart færdig'}` };
+      return { cls: 'run', label: 'I brug', sub: `til ${hm} · ${Math.max(left, 1)} min` };
     }
     if ((r = /Start\w*\s*(\d{1,2}[:.]\d{2})/i.exec(d))) {
       const since = -minutesUntil(r[1].replace('.', ':'));
