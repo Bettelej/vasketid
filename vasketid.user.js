@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.1
+// @version      0.6.2
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -877,9 +877,49 @@
     render();
   }
 
-  function selectDay(ts) {
+  let shownDay = null; // dagen Book-siden viser lige nu
+  const DAYS = 14;
+
+  function selectDay(ts, dir = '') {
     S.day = ts;
+    S.slide = dir;
     render();
+    S.slide = '';
+    // Sørg for at den valgte dag kan ses i dagsvælgeren.
+    const strip = root.querySelector('.days');
+    const on = strip && strip.querySelector('.on');
+    if (on) {
+      const r = on.getBoundingClientRect();
+      const sr = strip.getBoundingClientRect();
+      if (r.left < sr.left || r.right > sr.right) {
+        strip.scrollBy({ left: r.left - sr.left - (strip.clientWidth - on.clientWidth) / 2, behavior: 'smooth' });
+      }
+    }
+  }
+
+  function stepDay(delta) {
+    const days = Array.from({ length: DAYS }, (_, i) => dayTs(i));
+    const j = days.indexOf(shownDay) + delta;
+    if (j < 0 || j >= days.length) return;
+    selectDay(days[j], delta > 0 ? 'next' : 'prev');
+  }
+
+  // Swipe på Book-siden: venstre = næste dag, højre = dagen før.
+  let swipe = null;
+  function onTouchStart(ev) {
+    if (S.view !== 'app' || S.tab !== 'book' || S.sheet || ev.touches.length !== 1) return;
+    if (ev.target.closest('.days, .o-handle')) return; // dagsvælgeren scroller selv vandret
+    const t = ev.touches[0];
+    swipe = { x: t.clientX, y: t.clientY };
+  }
+  function onTouchEnd(ev) {
+    if (!swipe) return;
+    const t = ev.changedTouches[0];
+    const dx = t.clientX - swipe.x;
+    const dy = t.clientY - swipe.y;
+    swipe = null;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    stepDay(dx < 0 ? 1 : -1);
   }
 
   let toastTimer;
@@ -944,8 +984,11 @@
   }
 
   function renderBook() {
-    const days = Array.from({ length: 14 }, (_, i) => dayTs(i));
+    const days = Array.from({ length: DAYS }, (_, i) => dayTs(i));
+    // Indtil man selv vælger en dag, vises den første dag med ledige tider.
     const day = S.day != null && days.includes(S.day) ? S.day : (days.find((ts) => loadedDay(ts) && freeSlots(ts) > 0) || days[0]);
+    shownDay = day;
+    const di = days.indexOf(day);
     const ownDays = new Set(bookingGroups().map((g) => g.day));
     const strip = days.map((ts) => {
       const n = loadedDay(ts) ? freeSlots(ts) : null;
@@ -989,8 +1032,13 @@
       <section class="block">
         <h2>Book vask</h2>
         <div class="days">${strip}</div>
-        <div class="dayhead">${esc(fullDay(day))}<span class="muted small">${esc(updated)}</span></div>
-        <div class="slots">${list}</div>
+        <div class="dayhead">
+          <button class="daynav" data-act="day-step" data-d="-1" ${di <= 0 ? 'disabled' : ''} aria-label="Dagen før">‹</button>
+          <span class="dh-title">${esc(fullDay(day))}</span>
+          <button class="daynav" data-act="day-step" data-d="1" ${di >= days.length - 1 ? 'disabled' : ''} aria-label="Næste dag">›</button>
+        </div>
+        <div class="muted small dh-upd">${esc(updated)}</div>
+        <div class="slots ${S.slide ? 'slide-' + S.slide : ''}">${list}</div>
       </section>`;
   }
 
@@ -1359,6 +1407,7 @@
       case 'status-retry': refreshStatus(); break;
       case 'settings': S.sheet = { kind: 'settings' }; render(); break;
       case 'day': selectDay(+el.dataset.ts); break;
+      case 'day-step': stepDay(+el.dataset.d); break;
       case 'book': openBooking(el.dataset.from, +el.dataset.ts); break;
       case 'probe': probe(+el.dataset.i); break;
       case 'machine': toggleMachine(el.dataset.label); break;
@@ -1424,7 +1473,13 @@
   #vt-root .dayb.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
   #vt-root .dayb.on .d-top,#vt-root .dayb.on .d-free{color:var(--accent-fg);opacity:.9}
   #vt-root .dayb.on .d-dot{background:var(--accent-fg)}
-  #vt-root .dayhead{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:17px;margin:6px 0 8px}
+  #vt-root .dayhead{display:flex;align-items:center;gap:6px;font-weight:700;font-size:17px;margin:6px 0 0}
+  #vt-root .dh-title{flex:1;text-align:center}
+  #vt-root .daynav{width:40px;height:36px;border:1px solid var(--line);background:var(--card);border-radius:10px;font-size:22px;line-height:1;color:var(--accent);flex:none}
+  #vt-root .daynav:disabled{opacity:.3}
+  #vt-root .dh-upd{text-align:center;margin:2px 0 8px}
+  #vt-root .slots.slide-next{animation:vtslideN .2s ease-out} #vt-root .slots.slide-prev{animation:vtslideP .2s ease-out}
+  @keyframes vtslideN{from{transform:translateX(24px);opacity:.3}} @keyframes vtslideP{from{transform:translateX(-24px);opacity:.3}}
   #vt-root .slots{display:flex;flex-direction:column;gap:8px}
   #vt-root .slot{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border-radius:14px;padding:10px 10px 10px 12px;border:1px solid var(--line);background:var(--card);min-height:62px}
   #vt-root .s-time{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;width:66px;flex:none;white-space:nowrap}
@@ -1544,6 +1599,8 @@
     root.addEventListener('pointermove', onPointerMove);
     root.addEventListener('pointerup', onPointerUp);
     root.addEventListener('pointercancel', onPointerUp);
+    root.addEventListener('touchstart', onTouchStart, { passive: true });
+    root.addEventListener('touchend', onTouchEnd, { passive: true });
     document.title = 'Vasketid';
     let meta = document.querySelector('meta[name=theme-color]');
     if (!meta) { meta = document.createElement('meta'); meta.name = 'theme-color'; document.head.appendChild(meta); }
