@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.6.2
+// @version      0.6.3
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -994,10 +994,9 @@
       const n = loadedDay(ts) ? freeSlots(ts) : null;
       const d = new Date(ts);
       const top = Math.round((ts - dayTs(0)) / 864e5) === 0 ? 'I dag' : cap(WEEKDAYS[d.getDay()]);
-      return `<button class="dayb ${ts === day ? 'on' : ''} ${n === 0 ? 'full' : ''}" data-act="day" data-ts="${ts}">
+      return `<button class="dayb ${ts === day ? 'on' : ''} ${n === 0 ? 'full' : ''}" data-act="day" data-ts="${ts}" aria-label="${esc(fullDay(ts))}${n === 0 ? ', fuldt' : ''}">
         ${ownDays.has(ts) ? '<span class="d-dot" title="Du har en tid"></span>' : ''}
-        <span class="d-top">${esc(top)}</span><span class="d-num">${d.getDate()}</span>
-        <span class="d-free">${n == null ? '·' : n === 0 ? 'fuldt' : `${n} tid${n === 1 ? '' : 'er'}`}</span></button>`;
+        <span class="d-top">${esc(top)}</span><span class="d-num">${d.getDate()}</span></button>`;
     }).join('');
 
     const slots = slotsFor(day);
@@ -1031,14 +1030,16 @@
     return `
       <section class="block">
         <h2>Book vask</h2>
-        <div class="days">${strip}</div>
-        <div class="dayhead">
-          <button class="daynav" data-act="day-step" data-d="-1" ${di <= 0 ? 'disabled' : ''} aria-label="Dagen før">‹</button>
-          <span class="dh-title">${esc(fullDay(day))}</span>
-          <button class="daynav" data-act="day-step" data-d="1" ${di >= days.length - 1 ? 'disabled' : ''} aria-label="Næste dag">›</button>
+        <div class="daybar">
+          <div class="days">${strip}</div>
+          <div class="dayhead">
+            <button class="daynav" data-act="day-step" data-d="-1" ${di <= 0 ? 'disabled' : ''} aria-label="Dagen før">‹</button>
+            <span class="dh-title">${esc(fullDay(day))}</span>
+            <button class="daynav" data-act="day-step" data-d="1" ${di >= days.length - 1 ? 'disabled' : ''} aria-label="Næste dag">›</button>
+          </div>
         </div>
-        <div class="muted small dh-upd">${esc(updated)}</div>
         <div class="slots ${S.slide ? 'slide-' + S.slide : ''}">${list}</div>
+        <div class="muted small dh-upd">${esc(updated)}</div>
       </section>`;
   }
 
@@ -1046,10 +1047,10 @@
     const list = renderBookings();
     if (!list) return '<p class="empty">Henter dine vasketider…</p>';
     if (!bookingGroups().length) {
-      return `<section class="block"><h2>Dine vasketider</h2>${list}
+      return `<section class="block"><h2>Mine vasketider</h2>${list}
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
-    return `<section class="block"><h2>Dine vasketider</h2>${list}</section>`;
+    return `<section class="block"><h2>Mine vasketider</h2>${list}</section>`;
   }
 
   function stateClass(s) {
@@ -1119,14 +1120,14 @@
   }
 
   function renderStatus() {
-    let html = '';
+    let html = '<section class="block status-h"><h2>Status</h2></section>';
     if (S.statusBusy) html += `<div class="note"><span class="spinner"></span>${esc(S.statusBusy)}</div>`;
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
       const order = ordered();
       const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 50 + hillRank(n) : i; };
       const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
-      html += `<p class="muted small">Opdateret ${esc(ago(S.status.at))}.${S.planBusy ? ' Henter dagens bookinger…' : ''}</p>`;
+      html += `<p class="muted small status-upd">Opdateret ${esc(ago(S.status.at))}.${S.planBusy ? ' Henter dagens bookinger…' : ''}</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
           const term = S.terms.find((t) => sameLaundry(t, L.name));
@@ -1464,20 +1465,23 @@
   #vt-root .empty{color:var(--muted);text-align:center;padding:28px 0}
   #vt-root .mybook{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:12px 12px 12px 14px;margin-bottom:8px;box-shadow:var(--shadow)}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
-  #vt-root .days{display:flex;gap:8px;overflow-x:auto;padding:4px 16px 10px;margin:0 -16px;scrollbar-width:none}
+  #vt-root .daybar{position:sticky;top:0;z-index:4;background:var(--bg);margin:0 -16px;padding:8px 16px 6px;border-bottom:1px solid var(--line)}
+  #vt-root .days{display:flex;gap:6px;overflow-x:auto;padding:2px 16px 8px;margin:0 -16px;scrollbar-width:none}
   #vt-root .days::-webkit-scrollbar{display:none}
-  #vt-root .dayb{position:relative;flex:none;width:64px;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:8px 0;display:flex;flex-direction:column;align-items:center;gap:1px}
-  #vt-root .d-top{font-size:12px;color:var(--muted)} #vt-root .d-num{font-size:20px;font-weight:700;line-height:1.2} #vt-root .d-free{font-size:11px;color:var(--ok);font-weight:600}
-  #vt-root .d-dot{position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:4px;background:var(--accent)}
-  #vt-root .dayb.full .d-free{color:var(--muted);font-weight:400}
+  #vt-root .dayb{position:relative;flex:none;width:48px;border:1px solid var(--line);background:var(--card);border-radius:12px;padding:5px 0;display:flex;flex-direction:column;align-items:center;gap:0}
+  #vt-root .d-top{font-size:11px;color:var(--muted)} #vt-root .d-num{font-size:18px;font-weight:700;line-height:1.2}
+  #vt-root .d-dot{position:absolute;top:4px;right:4px;width:7px;height:7px;border-radius:4px;background:var(--accent)}
+  #vt-root .dayb.full{opacity:.45}
+  #vt-root .slots{margin-top:10px}
+  #vt-root .status-h{margin-bottom:0} #vt-root .status-upd{margin-top:0}
   #vt-root .dayb.on{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
-  #vt-root .dayb.on .d-top,#vt-root .dayb.on .d-free{color:var(--accent-fg);opacity:.9}
+  #vt-root .dayb.on .d-top{color:var(--accent-fg);opacity:.9} #vt-root .dayb.on.full{opacity:1}
   #vt-root .dayb.on .d-dot{background:var(--accent-fg)}
   #vt-root .dayhead{display:flex;align-items:center;gap:6px;font-weight:700;font-size:17px;margin:6px 0 0}
   #vt-root .dh-title{flex:1;text-align:center}
   #vt-root .daynav{width:40px;height:36px;border:1px solid var(--line);background:var(--card);border-radius:10px;font-size:22px;line-height:1;color:var(--accent);flex:none}
   #vt-root .daynav:disabled{opacity:.3}
-  #vt-root .dh-upd{text-align:center;margin:2px 0 8px}
+  #vt-root .dh-upd{text-align:center;margin:12px 0 0}
   #vt-root .slots.slide-next{animation:vtslideN .2s ease-out} #vt-root .slots.slide-prev{animation:vtslideP .2s ease-out}
   @keyframes vtslideN{from{transform:translateX(24px);opacity:.3}} @keyframes vtslideP{from{transform:translateX(-24px);opacity:.3}}
   #vt-root .slots{display:flex;flex-direction:column;gap:8px}
