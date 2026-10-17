@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.17
+// @version      0.9.18
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -25,7 +25,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.17'; // skal matche @version øverst
+  const VERSION = '0.9.18'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1780,7 +1780,7 @@
   // Hjælpeteksten afhænger af telefonen (Firefox + Violentmonkey på Android, Safari + Userscripts på iPhone).
   function updateHelp() {
     const ua = navigator.userAgent;
-    if (/iPhone|iPad|iPod/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'Åbn Userscripts-appen og opdatér Vasketid – eller tryk aA → Userscripts i Safari.';
+    if (/iPhone|iPad|iPod/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'Tryk Opdatér. I fanen, der åbner, tryk aA → Userscripts → Installér. Gå så tilbage hertil og genindlæs.';
     if (/Android/i.test(ua)) return 'Åbn Violentmonkey (Firefox-menuen → Udvidelser) og tryk opdatér ved Vasketid.';
     return 'Åbn din userscript-udvidelse og opdatér Vasketid.';
   }
@@ -2279,7 +2279,7 @@
     else if (S.view === 'login') main = renderLogin();
     else if (S.view === 'setup') main = renderSetup();
     else {
-      if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><button class="btn-primary small-btn" data-act="do-update">Opdatér</button><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button><small class="upd-help">Virker knappen ikke? ${esc(updateHelp())}</small></div>`;
+      if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><button class="btn-primary small-btn" data-act="do-update">Opdatér</button><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button><small class="upd-help">${/iPhone|iPad|iPod/i.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1) ? '' : 'Virker knappen ikke? '}${esc(updateHelp())}</small></div>`;
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       if (DEMO) main += `<div class="demo-bar"><b>Testtilstand</b> – intet sendes til vasketur.dk<button class="btn-ghost small" data-act="demo-slow">Langsom: ${demoSlow() ? 'til' : 'fra'}</button></div>`;
       if (isSlow()) main += '<div class="slow-note">Forbindelsen til vasketur.dk er langsom lige nu. Tryk én gang, og giv den et øjeblik.</div>';
