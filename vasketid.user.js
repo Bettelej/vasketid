@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.14
+// @version      0.9.15
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -25,7 +25,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.14'; // skal matche @version øverst
+  const VERSION = '0.9.15'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1365,6 +1365,8 @@
     const sh = S.sheet;
     if (!sh || sh.kind !== 'book' || sh.phase !== 'choose') return;
     const c = sh.cands[sh.idx];
+    const cur = sh.probes[c.term];
+    if (cur && (cur.state === 'loading' || (cur.at && Date.now() - cur.at < 15000))) return; // henter allerede / lige hentet
     delete probeCache[probeKey(sh, c.term)];
     delete sh.probes[c.term];
     probe(sh.idx);
@@ -2117,7 +2119,7 @@
         if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere på ${esc(shortName(c.term))}.</div>`;
         const left = Math.ceil((PROBE_MS - (Date.now() - (p.at || 0))) / 1000);
         h += left > 0
-          ? `<div class="muted small center">Opdateres om ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</div>`
+          ? `<div class="muted small center">${PROBE_MS / 1000 - left >= 15 ? '<button class="btn-link small upd" data-act="reprobe">Opdateres</button>' : 'Opdateres'} om ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</div>` // tryk for at hente nu (tidligst 15 s efter sidst)
           : '<div class="muted small center">Listen er over 5 min gammel. <button class="btn-link small" data-act="reprobe">Opdatér</button></div>';
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
@@ -2583,6 +2585,7 @@
   #vt-root .slow-note{background:var(--resbg);color:var(--res);border-radius:12px;padding:10px 12px;margin:0 0 10px;font-size:14px;font-weight:600}
   #vt-root .demo-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--altbg);color:var(--alt);border:1px dashed var(--alt);border-radius:12px;padding:8px 12px;margin:0 0 10px;font-size:13px}
   #vt-root .demo-bar button{flex:none}
+  #vt-root .upd{text-decoration:underline;text-underline-offset:2px;padding:0;color:inherit;font:inherit}
   #vt-root .ver{cursor:pointer;user-select:none;-webkit-user-select:none}
   #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
