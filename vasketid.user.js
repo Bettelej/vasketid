@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.4
+// @version      0.8.5
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.4'; // skal matche @version øverst
+  const VERSION = '0.8.5'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -215,6 +215,7 @@
 
   async function login(user, pass) {
     if (isBlocked()) throw blockedError();
+    beforeLogin();
     selCache = null;
     sessTerm = null;
     const p = await request(BASE + 'Default.aspx', {}, true);
@@ -512,6 +513,39 @@
   const API_URL = BASE + 'Api/Mobile/VisionMobile.asmx';
   const API_NS = 'http://www.rco.se/Api/Mobile';
   const api = { guid: null, units: null, unit: -1, broken: '', off: false };
+
+  // API-nøglen huskes mellem åbninger (op til 9 min efter sidste brug), så appen ikke logger ind hver gang.
+  const API_KEY_MS = 9 * 60000;
+  let lastKeySave = 0;
+  function saveApiKey() {
+    if (!api.guid) return;
+    lastKeySave = Date.now();
+    store.set('apiKey', { guid: api.guid, units: api.units, user: (creds() || {}).user, at: lastKeySave });
+  }
+  function restoreApiKey() {
+    const k = store.get('apiKey', null);
+    const c = creds();
+    if (k && c && k.user === c.user && k.units && Date.now() - k.at < API_KEY_MS) {
+      api.guid = k.guid; api.units = k.units; api.unit = -1;
+      return true;
+    }
+    return false;
+  }
+  const clearApiKey = () => store.del('apiKey');
+
+  // Loft: højst 3 automatiske logins pr. 10 minutter (API + web tilsammen). Brugerens egne tryk tæller med, men stoppes ikke.
+  const LOGIN_CAP = 3;
+  const LOGIN_WINDOW = 10 * 60000;
+  let manualLogin = false;
+  const hhmmOf = (t) => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  function beforeLogin() {
+    const log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
+    if (!manualLogin && log.length >= LOGIN_CAP) {
+      throw new VtError('THROTTLE', `Appen har allerede logget ind ${LOGIN_CAP} gange de sidste 10 minutter og venter til kl. ${hhmmOf(log[0] + LOGIN_WINDOW)}, så kontoen ikke bliver spærret. Du kan selv trykke Log ind.`);
+    }
+    log.push(Date.now());
+    store.set('loginLog', log);
+  }
   let memCreds = null; // login tastet i denne session – kun i hukommelsen
   const timings = []; // målinger til test: {label, via, ms}
 
@@ -556,7 +590,8 @@
 
   async function apiCall(op, params = {}, timeout, guidName = 'loginguid') {
     const res = await soap(op, { [guidName]: xs(api.guid), ...params }, timeout);
-    if (code(res) === -2) { api.guid = null; throw new VtError('APISESSION', 'API-sessionen er udløbet'); }
+    if (code(res) === -2) { api.guid = null; clearApiKey(); throw new VtError('APISESSION', 'API-sessionen er udløbet'); }
+    if (Date.now() - lastKeySave > 30000) saveApiKey(); // hold den gemte nøgle frisk
     return res;
   }
 
@@ -564,8 +599,10 @@
     const c = creds();
     if (!c) throw new VtError('LOGIN', 'Du er ikke logget ind');
     if (isBlocked()) throw blockedError();
+    beforeLogin();
     step('Logger ind');
     api.guid = null;
+    clearApiKey();
     api.unit = -1;
     const res = await soap('Login', { systemname: xs('DB0073-ABMonten'), username: xs(c.user), Password: xs(c.pass), timeout: xi(600) });
     const g = (/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.exec(res.textContent) || [])[0];
@@ -573,6 +610,7 @@
     if (!g) throw new VtError('API', 'API-login gav intet svar');
     api.guid = g;
     api.units = list(await apiCall('GetBookUnits')).slice(1);
+    saveApiKey();
   }
 
   // Kører fn mod API'et; logger ind (igen), hvis sessionen mangler eller er udløbet.
@@ -907,8 +945,9 @@
     } else if (e.code === 'BADLOGIN') {
       S.view = 'login';
       store.del('creds');
+      clearApiKey();
       S.error = e.message;
-    } else if (e.code === 'BLOCKED') {
+    } else if (e.code === 'BLOCKED' || e.code === 'THROTTLE') {
       S.view = 'login';
       S.error = e.message;
     } else {
@@ -1428,7 +1467,14 @@
     api.broken = '';
     // API'et først (hurtigt). Fejler det, afgør websiden om koden er forkert.
     serial(async () => {
-      try { await apiConnect(); } catch (e) { api.broken = e.message || 'API-login fejlede'; await login(user, pass); }
+      manualLogin = true;
+      try {
+        try { await apiConnect(); } catch (e) {
+          if (['BLOCKED', 'THROTTLE'].includes(e.code)) throw e;
+          api.broken = e.message || 'API-login fejlede';
+          await login(user, pass);
+        }
+      } finally { manualLogin = false; }
     }, true).then(() => {
       if (remember) store.set('creds', { user, pass }); else store.del('creds');
       S.loggingIn = false;
@@ -1438,6 +1484,7 @@
 
   function doForget() {
     store.del('creds');
+    clearApiKey();
     S.sheet = null;
     toast('Login glemt på denne telefon');
     render();
@@ -2316,21 +2363,21 @@
     const c = savedCreds();
     if (c && isBlocked() && isLoginPage(document)) { S.view = 'login'; S.error = blockedError().message; render(); return; }
     // Med gemt login går alt via API'et – websiden behøver ikke engang at være logget ind.
-    if (c && !isBlocked()) {
+    let startupError = null;
+    if (c && !isBlocked() && !restoreApiKey()) {
       render();
-      try { await serial(apiConnect, true); } catch (e) { api.broken = e.message || 'API-login fejlede'; }
+      try { await serial(apiConnect, true); } catch (e) { api.broken = e.message || 'API-login fejlede'; startupError = e; }
     }
     if (isLoginPage(document) && !api.guid) {
-      if (!c) { S.view = 'login'; render(); return; }
-      render();
-      try {
-        await serial(() => login(c.user, c.pass), true);
-      } catch (e) {
-        S.view = 'login';
-        S.error = e.message;
-        render();
-        return;
+      // Ikke et login nummer to på websiden af sig selv – brugeren trykker selv Log ind.
+      S.view = 'login';
+      if (c) {
+        S.error = startupError && ['BLOCKED', 'THROTTLE'].includes(startupError.code)
+          ? startupError.message
+          : 'Automatisk login lykkedes ikke. Tryk Log ind for at prøve igen.';
       }
+      render();
+      return;
     }
     startApp();
   }
