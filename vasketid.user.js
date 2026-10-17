@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.4
+// @version      0.9.5
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.4'; // skal matche @version øverst
+  const VERSION = '0.9.5'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -111,11 +111,19 @@
       .slice(0, 300);
   }
 
+  // Sat, mens et Status-kald kører: går man væk fra Status, afbrydes kaldet, så Book ikke venter på det.
+  let statusCtrl = null;
+  const linkStatus = (ctrl) => { if (statusCtrl) statusCtrl.signal.addEventListener('abort', () => ctrl.abort()); };
+  const statusJob = (fn) => async () => {
+    statusCtrl = new AbortController();
+    try { return await fn(); } finally { statusCtrl = null; }
+  };
   async function request(url, opts = {}, allowLogin = false) {
     ctx = null; // kalderen sætter den igen, når den ved hvor serveren står
     let r;
     // Tidsgrænse: hænger vasketur.dk, giver vi op efter 12 sek. i stedet for at vente på browseren.
     const ctrl = new AbortController();
+    linkStatus(ctrl);
     const { timeout = 12000, ...fetchOpts } = opts;
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
@@ -572,6 +580,7 @@
     const env = '<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
       + `<soap:Body><${op} xmlns="${API_NS}">${body}</${op}></soap:Body></soap:Envelope>`;
     const ctrl = new AbortController();
+    linkStatus(ctrl);
     const timer = setTimeout(() => ctrl.abort(), timeout);
     let r;
     try {
@@ -871,7 +880,7 @@
     const cached = calDaysCache[term];
     const days = cached && Date.now() - cached.at < 60000 && cached.days.length && cached.days[0].ts === dayTs(0)
       ? cached.days // Book har lige hentet kalenderen
-      : await serial(() => apiRun(() => apiCalDays(term, 0, 0)));
+      : await serial(statusJob(() => apiRun(() => apiCalDays(term, 0, 0))));
     const passes = days.length ? days[0].passes : [];
     let known = need ? [...need] : null;
     for (const p of passes) {
@@ -886,7 +895,7 @@
         const ref = { date: p.date, pi: p.pi };
         const hit = mgCache[mgKey(term, ref)];
         const mg = hit && Date.now() - hit.at < MG_FRESH ? hit.mg
-          : await serial(() => apiRun(() => apiMachinesAt(term, ref, false)))
+          : await serial(statusJob(() => apiRun(() => apiMachinesAt(term, ref, false))))
             .catch((e) => (e.code === 'GONE' ? { options: null } : null));
         if (!mg) continue;
         if (!mg.options) booked = known || ['*']; // ingen ledige maskiner i tidsrummet
@@ -1133,7 +1142,7 @@
         try {
           plan = apiReady() ? await apiPlanDay(term, need) : { next: await planDay(term, need), now: {}, need };
         } catch (e) {
-          if (e.code === 'LEFT') continue; // gået væk fra Status – gem intet
+          if (e.code === 'LEFT' || !onStatus()) continue; // gået væk fra Status – gem intet
           plan = { next: {}, now: {}, need: [], failed: true }; // ikke kritisk – status vises bare uden tidspunkter
         }
         S.dayPlan[term] = { day: today, pass, at: Date.now(), full: full && !plan.failed, ...plan };
@@ -1162,7 +1171,7 @@
         : apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
       render();
       try {
-        S.status = await serial(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status') : Promise.reject(leftStatus())), true);
+        S.status = await serial(statusJob(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status') : Promise.reject(leftStatus()))), true);
         S.statusBusy = '';
         saveCache();
         render();
@@ -2191,6 +2200,7 @@
     switch (act) {
       case 'tab':
         S.tab = el.dataset.tab;
+        if (S.tab !== 'status' && statusCtrl) statusCtrl.abort(); // Book skal ikke vente på Status
         store.set('tab3', S.tab);
         { const sc = root.querySelector('.scroll'); if (sc) sc.scrollTop = 0; }
         render();
