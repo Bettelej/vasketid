@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.1
+// @version      0.8.2
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.1'; // skal matche @version øverst
+  const VERSION = '0.8.2'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -471,7 +471,7 @@
   }
 
   async function loadStatusOnce() {
-    step('Henter status (vasketur.dk er langsom her)');
+    step(statusLabel(' (vasketur.dk er langsom her)'));
     let base = cur && cur.doc.querySelector('a[href*="LinkStatus"]') ? cur : null;
     if (!base) {
       const sel = await selector();
@@ -738,8 +738,10 @@
   }
 
   // Status for alle vaskerier i ét kald – med rigtig køre-status (Started/Done) og klar-tid.
+  let statusAttempt = 1; // vises i aktivitetslinjen ved genforsøg
+  const statusLabel = (extra = '') => `Henter status${extra}${statusAttempt > 1 ? ` · forsøg ${statusAttempt} af 3` : ''}`;
   async function apiStatus() {
-    step('Henter status');
+    step(statusLabel());
     const res = await apiCall('GetMachineGroups', {}, 30000, 'loginGuid');
     const laundries = [];
     let L = null;
@@ -1020,6 +1022,7 @@
     S.statusError = '';
     let last;
     for (let attempt = 1; attempt <= 3; attempt++) {
+      statusAttempt = attempt;
       S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen (${attempt} af 3)…`
         : apiReady() ? 'Henter status…' : 'Henter status… vasketur.dk er langsom her, det kan tage op til 20 sekunder.';
       render();
@@ -1711,7 +1714,6 @@
 
   function renderStatus() {
     let html = '';
-    if (S.statusBusy) html += `<div class="note"><span class="spinner"></span>${esc(S.statusBusy)}</div>`;
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
       const order = ordered();
@@ -1733,8 +1735,8 @@
         const name = S.terms.find((t) => sameLaundry(t, L.name)) || L.name;
         html += `<section class="block card"><h2>${esc(name)}</h2>${groups}</section>`;
       }
-    } else if (!S.statusBusy && !S.statusError) {
-      html += '<p class="empty">Henter status…</p>';
+    } else if (!S.statusError) {
+      html += '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
     return html;
   }
