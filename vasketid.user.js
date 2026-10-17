@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.9
+// @version      0.9.10
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.9'; // skal matche @version øverst
+  const VERSION = '0.9.10'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1257,7 +1257,7 @@
   function probe(idx) {
     const sh = S.sheet;
     if (!sh || sh.kind !== 'book') return;
-    if (sh.idx !== idx) sh.remove = [];
+    if (sh.idx !== idx) { sh.remove = []; sh.touched = false; }
     sh.idx = idx;
     const c = sh.cands[idx];
     const p = sh.probes[c.term];
@@ -1315,6 +1315,7 @@
     const sh = S.sheet;
     if (!sh || sh.phase !== 'choose') return;
     sh.remove = sh.remove.includes(no) ? sh.remove.filter((x) => x !== no) : [...sh.remove, no];
+    sh.touched = true; // eget valg – listen hentes ikke igen af sig selv
     render();
   }
 
@@ -1331,6 +1332,7 @@
     if (!sh || sh.phase !== 'choose') return;
     sh.flash = '';
     sh.sel = sh.sel.includes(label) ? sh.sel.filter((x) => x !== label) : [...sh.sel, label];
+    sh.touched = true; // eget valg – listen hentes ikke igen af sig selv
     render();
   }
 
@@ -2472,7 +2474,7 @@
   setInterval(() => {
     const sh = S.sheet;
     const p = sh && sh.kind === 'book' && sh.phase === 'choose' ? sh.probes[sh.cands[sh.idx].term] : null;
-    if (p && p.state === 'ok' && Date.now() - (p.at || 0) >= PROBE_MS && !sh.sel.length && !sh.remove.length) reprobe();
+    if (p && p.state === 'ok' && Date.now() - (p.at || 0) >= PROBE_MS && !sh.touched) reprobe(); // forvalget tæller ikke som eget valg
     else if (activity || p) render();
   }, 1000);
 
