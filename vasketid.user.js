@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.6
+// @version      0.8.7
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.6'; // skal matche @version øverst
+  const VERSION = '0.8.7'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1093,6 +1093,7 @@
 
   async function refreshStatus() {
     if (S.statusBusy) return;
+    if (!passNow()) { S.statusError = ''; render(); return; } // uden for åbningstid: ingen kald (styringerne svarer ikke)
     S.statusError = '';
     let last;
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -1803,6 +1804,10 @@
   }
 
   function renderStatus() {
+    if (!passNow()) {
+      const nx = nextPass()[0];
+      return `<section class="block card closed-note"><h2>Uden for åbningstid</h2><p class="muted">Vaskerierne åbner ${toMin(nx) > nowMin() ? '' : 'i morgen '}kl. ${esc(shortTime(nx))}. Status vises igen, når de har åbent.</p></section>`;
+    }
     let html = '';
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
