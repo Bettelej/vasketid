@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.12
+// @version      0.9.13
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -17,13 +17,15 @@
   'use strict';
 
   const BASE = (location.pathname.match(/^\/[^/]+\//) || ['/DB0073/'])[0];
-  const KEY = 'vt:';
+  // Testtilstand (5 tryk på versionsnummeret under ⚙): et indbygget, falsk vasketur.dk. Intet sendes ud.
+  const DEMO = (() => { try { return localStorage.getItem('vt:demo') === '1'; } catch { return false; } })();
+  const KEY = DEMO ? 'vtdemo:' : 'vt:';
   const WEEKDAYS = ['søn', 'man', 'tir', 'ons', 'tor', 'fre', 'lør'];
   const WEEKDAYS_LONG = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.12'; // skal matche @version øverst
+  const VERSION = '0.9.13'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -124,6 +126,7 @@
     try { return await fn(); } finally { statusCtrl = null; }
   };
   async function request(url, opts = {}, allowLogin = false) {
+    if (DEMO) throw new VtError('NET', 'Testtilstand bruger ikke vasketur.dk.');
     ctx = null; // kalderen sætter den igen, når den ved hvor serveren står
     let r;
     // Tidsgrænse: hænger vasketur.dk, giver vi op efter 12 sek. i stedet for at vente på browseren.
@@ -583,6 +586,91 @@
   const xd = (iso) => ['dateTime', iso + 'T00:00:00'];
   const xmlEsc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+  // ---------------------------------------------------------------------------
+  // Falsk API til testtilstand – svarer som VisionMobile, men alt ligger i browseren.
+  // ---------------------------------------------------------------------------
+  const DEMO_UNITS = ['Sokkelundsvej 40', 'Rytterbakken 14', 'Svendelodden 12', 'Mesterstien 8', 'Smedetoften 7'];
+  const DEMO_PASSES = [['07:00', '09:00'], ['09:00', '11:00'], ['11:00', '13:00'], ['13:00', '15:00'], ['15:00', '17:00'], ['17:00', '19:00'], ['19:00', '20:30']];
+  const demo = { unit: 0, date: '', pi: 0 };
+  const demoSlow = () => store.get('demoSlow', false);
+  const demoMine = () => store.get('demoBookings', []); // [{u, date, pi, n}]
+  const demoIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const demoHash = (str) => { let h = 7; for (const ch of str) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
+  const demoOther = (u, date, pi, n) => demoHash(`${u}|${date}|${pi}|${n}`) % 10 < 3; // ca. 30 % er booket af andre
+  const demoTaken = (u, date, pi, n) => demoOther(u, date, pi, n) || demoMine().some((b) => b.u === u && b.date === date && b.pi === pi && b.n === n);
+  const demoUnits = () => (api.units && api.units.length ? api.units : DEMO_UNITS);
+  function demoReply(op, prm) {
+    const any = (...v) => v.map((x) => `<anyType>${xmlEsc(x)}</anyType>`).join('');
+    const u = demo.unit;
+    switch (op) {
+      case 'Login': return '00000000-0000-4000-8000-000000000000';
+      case 'GetBookUnits': return any(demoUnits().length, ...demoUnits());
+      case 'ConnectToUnit': demo.unit = +prm.unitindex || 0; return any(0);
+      case 'GetBookPrechoices': return any(1, 'Vask');
+      case 'GetBookingCalendarDays': {
+        const from = new Date(String(prm.startDate).slice(0, 10) + 'T00:00:00');
+        const to = new Date(String(prm.endDate).slice(0, 10) + 'T00:00:00');
+        let x = '';
+        for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
+          const iso = demoIso(d);
+          x += `<BookDay><BookDate>${iso}T00:00:00</BookDate>${DEMO_PASSES.map(([f, t], i) => {
+            const free = [1, 2, 3, 4].some((n) => !demoTaken(u, iso, i, n));
+            return `<BookDayPass><PassIndex>${i}</PassIndex><StartTime>${f}</StartTime><EndTime>${t}</EndTime><IsFree>${free}</IsFree><IsBookable>true</IsBookable></BookDayPass>`;
+          }).join('')}</BookDay>`;
+        }
+        return x;
+      }
+      case 'SetBookPass': demo.date = String(prm.SystemDate).slice(0, 10); demo.pi = +prm.passindex || 0; return any(0);
+      case 'GetBookMachineGroupTypes': return any([1, 2, 3, 4].some((n) => !demoTaken(u, demo.date, demo.pi, n)) ? 1 : 0, 'Vask');
+      case 'GetNextBookMachineGroups': return any(4, 'Vask1', 'Vask2', 'Vask3', 'Vask4');
+      case 'GetBookMachineGroupsFree': return any(4, ...[1, 2, 3, 4].map((n) => (demoTaken(u, demo.date, demo.pi, n) ? 0 : 1)));
+      case 'GetBookMachineGroupsCountersLeft': return any(1, Math.max(0, 10 - demoMine().length));
+      case 'SetBookMachineGroup': {
+        const n = (+prm.machinegroupindex || 0) + 1;
+        if (demoTaken(u, demo.date, demo.pi, n)) return any(0);
+        store.set('demoBookings', [...demoMine(), { u, date: demo.date, pi: demo.pi, n }]);
+        const [f, t] = DEMO_PASSES[demo.pi];
+        return any(4, demo.date.replace(/-/g, ''), `Vask ${n}`, f, t);
+      }
+      case 'GetBookUserBookingCount': return String(demoMine().filter((b) => b.u === u).length);
+      case 'GetBookUserBookings': {
+        const b = demoMine().filter((x) => x.u === u)[+prm.bookindex || 0];
+        if (!b) return any(0);
+        const d = new Date(b.date + 'T00:00:00');
+        const day = `${WEEKDAYS_LONG[d.getDay()].replace(/^./, (c) => c.toUpperCase())} ${d.getDate()} ${Object.keys(MONTHS)[d.getMonth()].replace(/^./, (c) => c.toUpperCase())}`;
+        const [f, t] = DEMO_PASSES[b.pi];
+        return any(5, day, `Vask ${b.n}`, f, t, true);
+      }
+      case 'DelBookUserBookings': {
+        const mine = demoMine().filter((x) => x.u === u)[+prm.bookindex || 0];
+        if (mine) store.set('demoBookings', demoMine().filter((x) => x !== mine && !(x.u === mine.u && x.date === mine.date && x.pi === mine.pi && x.n === mine.n)));
+        return any(0);
+      }
+      case 'GetMachineGroups': {
+        const now = new Date();
+        const iso = demoIso(now);
+        const pi = DEMO_PASSES.findIndex(([f, t]) => toMin(f) <= nowMin() && nowMin() < toMin(t));
+        const mach = (label, run, mins) => `<Machine><MachineName>${label}</MachineName><Status>${run ? 'Started' : 'Done'}</Status><ReadyTime>${run ? `${String(new Date(Date.now() + mins * 60000).getHours()).padStart(2, '0')}:${String(new Date(Date.now() + mins * 60000).getMinutes()).padStart(2, '0')}` : '-'}</ReadyTime><StartTime>-</StartTime></Machine>`;
+        return demoUnits().map((name, ui) => {
+          const runs = (n) => pi >= 0 && demoOther(ui, iso, pi, n) && demoHash(`${ui}${n}${pi}`) % 2 === 0;
+          return `<SelectionObjectsAndObjectStatus><Name>Bestil vask ${xmlEsc(name)}</Name>${[1, 2, 3, 4].map((n) => mach(`VASK ${n}`, runs(n), 20 + (demoHash(`${ui}${n}`) % 60))).join('')}</SelectionObjectsAndObjectStatus>`
+            + `<SelectionObjectsAndObjectStatus><Name>Bestil tørretumbler ${xmlEsc(name)}</Name>${[1, 2].map((n) => mach(`TØRRE ${n}`, runs(n + 4), 10 + (demoHash(`t${ui}${n}`) % 40))).join('')}</SelectionObjectsAndObjectStatus>`;
+        }).join('');
+      }
+      default: return any(0);
+    }
+  }
+  function demoFetch(op, params, signal) {
+    const prm = Object.fromEntries(Object.entries(params).map(([k, [, v]]) => [k, v]));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const xml = `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><${op}Response xmlns="${API_NS}"><${op}Result>${demoReply(op, prm)}</${op}Result></${op}Response></soap:Body></soap:Envelope>`;
+        resolve(new Response(xml, { status: 200, headers: { 'Content-Type': 'text/xml' } }));
+      }, demoSlow() ? 4500 : 150);
+      if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('aborted', 'AbortError')); });
+    });
+  }
+
   async function soap(op, params = {}, timeout = 15000) {
     const body = Object.entries(params).map(([k, [t, v]]) => `<${k} xsi:type="xsd:${t}">${xmlEsc(v)}</${k}>`).join('');
     const env = '<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -593,7 +681,7 @@
     const t0 = Date.now();
     let r;
     try {
-      r = await fetch(API_URL, {
+      r = DEMO ? await demoFetch(op, params, ctrl.signal) : await fetch(API_URL, {
         method: 'POST', credentials: 'same-origin', body: env, signal: ctrl.signal,
         headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: `"${API_NS}/${op}"` },
       });
@@ -1253,6 +1341,24 @@
   const PROBE_MS = 5 * 60000;
   const probeCache = {};
   const probeKey = (sh, term) => `${term}|${sh.day}|${sh.from}`;
+  // 5 tryk på versionsnummeret inden for 4 sek. slår testtilstand til/fra.
+  let verTaps = [];
+  let verHint = ''; // vises ved versionsnummeret under ⚙
+  function tapVersion() {
+    verTaps = [...verTaps.filter((t) => Date.now() - t < 4000), Date.now()];
+    const left = 5 - verTaps.length;
+    if (left > 0) { verHint = verTaps.length >= 2 ? `${left} tryk mere for at slå testtilstand ${DEMO ? 'fra' : 'til'}` : ''; render(); return; }
+    verTaps = [];
+    try {
+      if (DEMO) localStorage.removeItem('vt:demo');
+      else {
+        // Testtilstand starter med dine vaskerier og indstillinger – men med sit eget lager.
+        for (const k of ['order', 'count', 'terms']) { const v = localStorage.getItem('vt:' + k); if (v != null && localStorage.getItem('vtdemo:' + k) == null) localStorage.setItem('vtdemo:' + k, v); }
+        localStorage.setItem('vt:demo', '1');
+      }
+    } catch { /* ignore */ }
+    location.reload();
+  }
   function reprobe() {
     const sh = S.sheet;
     if (!sh || sh.kind !== 'book' || sh.phase !== 'choose') return;
@@ -2072,7 +2178,7 @@
     h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
     const hist = store.get('loginHist', []).filter((t) => Date.now() - t < 24 * 3600000);
     h += `<p class="muted small">Logins det sidste døgn: ${hist.length}${hist.length ? ` (seneste kl. ${hhmmOf(hist[hist.length - 1])})` : ''}.</p>`;
-    h += `<p class="muted small">v${VERSION}</p>`;
+    h += `<p class="muted small ver" data-act="ver">v${VERSION}${DEMO ? ' · testtilstand' : ''}${verHint ? ` · ${esc(verHint)}` : ''}</p>`;
     h += `<div class="sh-foot"><a class="btn-link small" href="${HELP_URL}" target="_blank" rel="noopener">Hjælp og vejledning</a><button class="btn-link small" data-act="original">Åbn den gamle side</button>`;
     if (savedCreds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
     h += '</div>';
@@ -2172,6 +2278,7 @@
     else {
       if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><button class="btn-primary small-btn" data-act="do-update">Opdatér</button><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button><small class="upd-help">Virker knappen ikke? ${esc(updateHelp())}</small></div>`;
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
+      if (DEMO) main += `<div class="demo-bar"><b>Testtilstand</b> – intet sendes til vasketur.dk<button class="btn-ghost small" data-act="demo-slow">Langsom: ${demoSlow() ? 'til' : 'fra'}</button></div>`;
       if (isSlow()) main += '<div class="slow-note">Forbindelsen til vasketur.dk er langsom lige nu. Tryk én gang, og giv den et øjeblik.</div>';
       main += S.tab === 'book' ? renderBook() : S.tab === 'mine' ? renderMine() : renderStatus();
     }
@@ -2265,6 +2372,8 @@
       case 'book': openBooking(el.dataset.from, +el.dataset.ts); break;
       case 'probe': probe(+el.dataset.i); break;
       case 'reprobe': reprobe(); break;
+      case 'ver': tapVersion(); break;
+      case 'demo-slow': store.set('demoSlow', !demoSlow()); render(); break;
       case 'machine': toggleMachine(el.dataset.label); break;
       case 'machine-own': toggleOwn(el.dataset.no); break;
       case 'count': setCount(S.count + +el.dataset.d); break;
@@ -2468,6 +2577,9 @@
   #vt-root .btn-x{border:0;background:none;color:var(--muted);width:32px;height:32px;font-size:15px}
   #vt-root .activity.slow{color:var(--fg);border-color:var(--accent);font-weight:600}
   #vt-root .slow-note{background:var(--resbg);color:var(--res);border-radius:12px;padding:10px 12px;margin:0 0 10px;font-size:14px;font-weight:600}
+  #vt-root .demo-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--altbg);color:var(--alt);border:1px dashed var(--alt);border-radius:12px;padding:8px 12px;margin:0 0 10px;font-size:13px}
+  #vt-root .demo-bar button{flex:none}
+  #vt-root .ver{cursor:pointer;user-select:none;-webkit-user-select:none}
   #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
@@ -2515,6 +2627,12 @@
     if (!meta) { meta = document.createElement('meta'); meta.name = 'theme-color'; document.head.appendChild(meta); }
     meta.content = matchMedia('(prefers-color-scheme: dark)').matches ? '#0d0f13' : '#f3f4f6';
 
+    if (DEMO) {
+      api.guid = '00000000-0000-4000-8000-000000000000';
+      api.units = store.get('terms', []).length ? store.get('terms', []) : DEMO_UNITS;
+      startApp();
+      return;
+    }
     const c = savedCreds();
     if (c && isBlocked() && isLoginPage(document)) { S.view = 'login'; S.error = blockedError().message; render(); return; }
     // Med gemt login går alt via API'et – websiden behøver ikke engang at være logget ind.
