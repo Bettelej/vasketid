@@ -20,7 +20,7 @@ Userscript der giver [vasketur.dk](https://web.vasketur.dk/DB0073/Default.aspx) 
 
 ## Udgiv en ny version
 
-1. Ret `vasketid.user.js` og hæv `@version`.
+1. Ret `vasketid.user.js` og hæv `@version`. (`vasketid.meta.js` genereres automatisk af pre-commit-hooken i `.githooks/` – kræver `git config core.hooksPath .githooks` én gang pr. klon).
 2. Commit og push til `main` – GitHub Pages udgiver automatisk, og brugernes script opdaterer sig selv.
 
 Ikke tilknyttet Electrolux eller vasketur.dk.

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Hold vasketid.meta.js (kun header-blokken) i sync med vasketid.user.js.
+# Userscripts (iPhone) og Violentmonkey tjekker @updateURL = .meta.js for nye versioner.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+sed -n '1,/^\/\/ ==\/UserScript==/p' vasketid.user.js > vasketid.meta.js
+git add vasketid.meta.js
