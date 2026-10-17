@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.2
+// @version      0.7.3
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -832,7 +832,7 @@
     const all = bookingGroups();
     const total = all.reduce((x, g) => x + g.items.length, 0);
     const groups = S.mineSel.length
-      ? all.map((g) => ({ ...g, items: g.items.filter((b) => S.mineSel.includes(b.key)) })).filter((g) => g.items.length)
+      ? all.map((g) => ({ ...g, items: g.items.filter((b) => S.mineSel.includes(selKey(b))) })).filter((g) => g.items.length)
       : all;
     const n = groups.reduce((x, g) => x + g.items.length, 0);
     if (groups.length) { S.sheet = { kind: 'cancelall', phase: 'confirm', groups, partial: n < total }; render(); }
@@ -841,7 +841,7 @@
   function toggleMineGroup(gk) {
     const g = bookingGroups().find((x) => groupKey(x) === gk);
     if (!g) return;
-    const keys = g.items.map((b) => b.key);
+    const keys = g.items.map(selKey);
     const allOn = keys.every((k) => S.mineSel.includes(k));
     S.mineSel = allOn ? S.mineSel.filter((k) => !keys.includes(k)) : [...new Set([...S.mineSel, ...keys])];
     render();
@@ -1072,21 +1072,23 @@
   };
 
   const groupKey = (g) => `${g.day}|${g.from}|${g.term}`;
+  // Markering på Mine skal kende vaskeriet: samme dato/tid/maskine kan findes i flere vaskerier.
+  const selKey = (b) => `${b.term}::${b.key}`;
 
   function renderBookings() {
     const groups = bookingGroups();
     if (!groups.length) return S.bookingsAt ? '<p class="muted small">Du har ingen vasketider booket.</p>' : '';
     return groups.map((g) => {
       const gk = groupKey(g);
-      const keys = g.items.map((b) => b.key);
+      const keys = g.items.map(selKey);
       const n = keys.filter((k) => S.mineSel.includes(k)).length;
       const state = n === 0 ? '' : n === keys.length ? 'all' : 'some';
       const multi = g.items.length > 1;
       const open = multi && S.mineOpen.includes(gk);
       const sub = open
         ? `<div class="mb-items">${g.items.map((b) => {
-          const on = S.mineSel.includes(b.key);
-          return `<div class="mb-item ${on ? 'sel' : ''}"><button class="mb-check small" data-act="mine-item" data-key="${esc(b.key)}" aria-label="Markér ${esc(b.cells[1])}">${on ? '✓' : ''}</button><span>${esc(b.cells[1])}</span></div>`;
+          const on = S.mineSel.includes(selKey(b));
+          return `<div class="mb-item ${on ? 'sel' : ''}"><button class="mb-check small" data-act="mine-item" data-key="${esc(selKey(b))}" aria-label="Markér ${esc(b.cells[1])}">${on ? '✓' : ''}</button><span>${esc(b.cells[1])}</span></div>`;
         }).join('')}</div>`
         : '';
       return `<div class="mybook ${state ? 'sel' : ''}">
@@ -1173,7 +1175,7 @@
         <button class="btn-primary" data-act="tab" data-tab="book">Book en tid</button></section>`;
     }
     const groups = bookingGroups();
-    const allKeys = groups.flatMap((g) => g.items.map((b) => b.key));
+    const allKeys = groups.flatMap((g) => g.items.map(selKey));
     S.mineSel = S.mineSel.filter((k) => allKeys.includes(k)); // glem markeringer for maskiner, der er væk
     const n = S.mineSel.length;
     const all = n
