@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.4
+// @version      0.7.5
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -76,9 +76,17 @@
       try { j.resolve(await j.fn()); } catch (e) { j.reject(e); }
     }
     running = false;
+    activity = null;
     render();
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Hvad appen venter på lige nu (vises nederst og i bookingvinduet med sekunder).
+  let activity = null;
+  function step(label) {
+    activity = { label, since: Date.now() };
+    render();
+  }
 
   function texts(doc, root) {
     const out = [];
@@ -104,10 +112,16 @@
   async function request(url, opts = {}, allowLogin = false) {
     ctx = null; // kalderen sætter den igen, når den ved hvor serveren står
     let r;
+    // Tidsgrænse: hænger vasketur.dk, giver vi op efter 12 sek. i stedet for at vente på browseren.
+    const ctrl = new AbortController();
+    const { timeout = 12000, ...fetchOpts } = opts;
+    const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      r = await fetch(url, { credentials: 'same-origin', ...opts });
+      r = await fetch(url, { credentials: 'same-origin', ...fetchOpts, signal: ctrl.signal });
     } catch (e) {
-      throw new VtError('NET', 'Ingen forbindelse til vasketur.dk. Tjek dit net.');
+      throw new VtError('NET', e.name === 'AbortError' ? 'vasketur.dk svarer ikke lige nu. Prøv igen.' : 'Ingen forbindelse til vasketur.dk. Tjek dit net.');
+    } finally {
+      clearTimeout(timer);
     }
     if (!r.ok) throw new VtError('HTTP', `vasketur.dk svarede med fejl ${r.status}`);
     const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
@@ -115,7 +129,10 @@
     if (/\/ErrorPages\//i.test(r.url)) {
       cur = null;
       sessTerm = null;
-      throw new VtError('SERVER', pageMessage(doc) || 'Fejl hos vasketur.dk');
+      const raw = pageMessage(doc);
+      throw new VtError('SERVER', /ingen kontakt med systemet/i.test(raw)
+        ? 'vasketur.dk har ikke forbindelse til vaskerierne lige nu. Prøv igen om lidt.'
+        : 'vasketur.dk havde en fejl. Prøv igen om lidt.');
     }
     if (!allowLogin && isLoginPage(doc)) {
       cur = null;
@@ -145,13 +162,14 @@
     return p.toString();
   }
 
-  function post(page, extra, allowLogin = false) {
+  function post(page, extra, allowLogin = false, timeout = 12000) {
     const f = page.doc.forms[0];
     const action = new URL((f && f.getAttribute('action')) || page.url, page.url).href;
     return request(action, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: formBody(page.doc, extra),
+      timeout,
     }, allowLogin);
   }
 
@@ -182,6 +200,7 @@
   const creds = () => store.get('creds', null);
 
   async function login(user, pass) {
+    selCache = null;
     sessTerm = null;
     const p = await request(BASE + 'Default.aspx', {}, true);
     const res = await post(p, {
@@ -201,6 +220,7 @@
     } catch (e) {
       const c = creds();
       if ((e.code === 'LOGIN' || e.code === 'SERVER') && c) {
+        step('Logger ind igen');
         await login(c.user, c.pass);
         return fn();
       }
@@ -215,9 +235,12 @@
       .filter((t) => t.name && t.pb);
   }
 
-  async function selector() {
+  let selCache = null; // {page, at} – siden med vaskeri-listen kan genbruges til at vælge vaskeri
+  async function selector(fresh = false) {
+    if (!fresh && selCache && Date.now() - selCache.at < 10 * 60000) return selCache.page;
+    step('Henter vaskerier');
     let p = await request(BASE + 'Booking/TerminalSelector.aspx');
-    if (parseTerminals(p).length) return p;
+    if (parseTerminals(p).length) { selCache = { page: p, at: Date.now() }; return p; }
     const panel = p.doc.querySelector('a[href*="LinkButtonEls"]');
     if (panel) {
       p = await activate(p, panel);
@@ -226,11 +249,24 @@
     throw new VtError('PARSE', 'Kunne ikke finde listen over vaskerier');
   }
 
-  async function openTerminal(name) {
-    const sel = await selector();
+  async function openTerminal(name, fresh = false) {
+    const sel = await selector(fresh);
     const t = parseTerminals(sel).find((x) => x.name === name);
     if (!t) throw new VtError('PARSE', `Fandt ikke vaskeriet "${name}"`);
-    const main = await postback(sel, t.pb.target, t.pb.arg); // -> BookingMain.aspx
+    let main;
+    step(`Åbner ${shortName(name)}`);
+    try {
+      main = await postback(sel, t.pb.target, t.pb.arg); // -> BookingMain.aspx
+    } catch (e) {
+      if (fresh || e.code === 'LOGIN') { selCache = null; throw e; }
+      selCache = null;
+      return openTerminal(name, true);
+    }
+    if (!main.doc.querySelector('a[href*="LinkBooking"]')) { // gemt liste virkede ikke – hent frisk
+      selCache = null;
+      if (!fresh) return openTerminal(name, true);
+      throw new VtError('PARSE', 'Kunne ikke åbne vaskeriet');
+    }
     ctx = { term: name, page: 'main' };
     sessTerm = name;
     return main;
@@ -261,8 +297,9 @@
 
   // --- Kalender ---
   async function openCalendar(main, week, term) {
+    step(`Henter kalender · ${shortName(term)}`);
     let p = await postback(main, 'ctl00$LinkBooking');
-    for (let i = 0; i < week; i++) p = await clickByName(p, NEXT_BTN);
+    for (let i = 0; i < week; i++) { step(`Næste uge · ${shortName(term)}`); p = await clickByName(p, NEXT_BTN); }
     ctx = { term, page: 'calendar', week };
     return p;
   }
@@ -272,6 +309,7 @@
     if (ctx && cur && ctx.term === term) {
       if (ctx.page === 'calendar' && ctx.week === week) return cur;
       if (ctx.page === 'calendar' && ctx.week === week - 1) {
+        step(`Næste uge · ${shortName(term)}`);
         const p = await clickByName(cur, NEXT_BTN);
         ctx = { term, page: 'calendar', week };
         return p;
@@ -333,15 +371,19 @@
       const cal = await gotoCalendar(term, week);
       const cell = parseCalendar(cal, week).cells.find((c) => c.id === cellId);
       if (!cell || !cell.bookable) throw new VtError('GONE', 'Tiden er ikke længere ledig her.');
+      step(`Henter maskiner · ${shortName(term)}`);
       return parseMachineGroup(await postback(cal, 'BookPass' + cellId, cellId));
     } catch (e) {
       if (!retry || e.code === 'LOGIN' || e.code === 'GONE') throw e;
       ctx = null; // genvejen holdt ikke – tag den lange vej én gang
+      step('Prøver igen');
       return startBooking(term, week, cellId, false);
     }
   }
 
   async function confirmBooking(mg, name) {
+    const lbl = (mg.options.find((o) => o.name === name) || {}).label || '';
+    step(`Booker ${lbl}`.trim());
     const p = await clickByName(mg.page, name);
     const t = texts(p.doc).join(' ');
     if (!/Bestilling OK/i.test(t)) throw new VtError('BOOK', pageMessage(p.doc) || 'Bookingen gik ikke igennem');
@@ -373,6 +415,7 @@
 
   // Afbestiller flere bookinger i samme vaskeri. Returnerer vaskeriets bookinger bagefter.
   async function cancelMany(term, keys) {
+    step(`Afbestiller · ${shortName(term)}`);
     let page = await openTerminal(term);
     const failed = [];
     for (const key of keys) {
@@ -419,6 +462,7 @@
   }
 
   async function loadStatusOnce() {
+    step('Henter status (vasketur.dk er langsom her)');
     let base = cur && cur.doc.querySelector('a[href*="LinkStatus"]') ? cur : null;
     if (!base) {
       const sel = await selector();
@@ -426,7 +470,8 @@
       base = await postback(sel, t.pb.target, t.pb.arg);
       sessTerm = t.name;
     }
-    return parseStatus(await postback(base, 'ctl00$LinkStatus'));
+    // Status-siden er langsom hos vasketur.dk (10–20 sek.), så den får længere tidsgrænse.
+    return parseStatus(await post(base, { __EVENTTARGET: 'ctl00$LinkStatus', __EVENTARGUMENT: '' }, false, 45000));
   }
 
   // ---------------------------------------------------------------------------
@@ -574,15 +619,16 @@
   // Går dagens resterende vasketider igennem for ét vaskeri og finder første booking pr. maskine.
   // Åbner kun maskinvalget (som når man trykker Book) – der bookes ikke noget.
   async function planDay(term, nums) {
-    const cal = await gotoCalendar(term, 0);
-    const parsed = parseCalendar(cal, 0);
-    S.cal[term + '|0'] = parsed;
+    const parsed = await serial(() => withSession(async () => {
+      const p = parseCalendar(await gotoCalendar(term, 0), 0);
+      S.cal[term + '|0'] = p;
+      return p;
+    }));
     const di = parsed.days.indexOf(dayTs(0));
     const slots = parsed.cells.filter((c) => c.d === di && c.from && toMin(c.from) > nowMin())
       .sort((a, b) => toMin(a.from) - toMin(b.from));
     const next = {};
     let known = nums ? [...nums] : null;
-    let page = cal;
     for (const c of slots) {
       if (known && known.every((n) => next[n])) break;
       if (!c.bookable) { // helt optaget: alle (resterende) maskiner er booket her
@@ -590,18 +636,23 @@
         else next['*'] = c.from;
         break;
       }
-      const mgPage = await postback(page, 'BookPass' + c.id, c.id);
-      let mg;
-      try { mg = parseMachineGroup(mgPage); } catch (e) { mg = { options: [] }; }
+      // Hvert tidsrum er sit eget job – en booking kan komme til imellem dem.
+      const mg = await serial(() => withSession(async () => {
+        const cal = await gotoCalendar(term, 0);
+        step(`Tjekker dagens bookinger · ${shortName(term)}`);
+        const mgPage = await postback(cal, 'BookPass' + c.id, c.id);
+        let res;
+        try { res = parseMachineGroup(mgPage); } catch (e) { res = { options: [] }; }
+        const back = mgPage.doc.querySelector('input[name$="btMaskingruppBack"]');
+        if (back) { await activate(mgPage, back); ctx = { term, page: 'calendar', week: 0 }; }
+        return res;
+      }));
       const offered = mg.options.map((o) => machineNo(o.label));
       if (!known) known = offered;
       known.forEach((n) => {
         const o = mg.options.find((x) => machineNo(x.label) === n);
         if (!next[n] && (!o ? offered.length > 0 : o.disabled)) next[n] = c.from;
       });
-      const back = mgPage.doc.querySelector('input[name$="btMaskingruppBack"]');
-      page = back ? await activate(mgPage, back) : await gotoCalendar(term, 0);
-      ctx = { term, page: 'calendar', week: 0 };
     }
     return next;
   }
@@ -618,7 +669,7 @@
         const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
         const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
         const nums = G ? G.machines.map((m) => machineNo(m.name)) : null;
-        const next = await serial(() => withSession(() => planDay(term, nums)));
+        const next = await planDay(term, nums);
         S.dayPlan[term] = { day: today, at: Date.now(), next };
         render();
       }
@@ -759,6 +810,7 @@
   function toggleMachine(label) {
     const sh = S.sheet;
     if (!sh || sh.phase !== 'choose') return;
+    sh.flash = '';
     sh.sel = sh.sel.includes(label) ? sh.sel.filter((x) => x !== label) : [...sh.sel, label];
     render();
   }
@@ -799,10 +851,41 @@
       });
       return { ...res, cancelled };
     }, true).then((res) => {
-      sh.phase = 'done';
-      sh.result = res;
+      if (res.error) {
+        sh.phase = 'done';
+        sh.result = res;
+        render();
+        loadCalendar(c.term, sh.week).then(saveCache, () => {});
+        return;
+      }
+      const parts = [];
+      if (res.done.length) parts.push(`Booket ${machineList(res.done)}`);
+      if (res.cancelled && res.cancelled.length) parts.push(`afbestilt ${machineList(res.cancelled)}`);
+      const flash = parts.join(' · ');
+      sh.flash = flash.charAt(0).toUpperCase() + flash.slice(1);
+      sh.phase = 'choose';
+      sh.sel = [];
+      sh.remove = [];
+      sh.probes[c.term] = { state: 'loading', waiting: false };
       render();
-      loadCalendar(c.term, sh.week).then(saveCache, () => {});
+      // Hent bookinger og maskinvalg igen, så vinduet viser det nye ("din").
+      serial(() => withSession(async () => {
+        const main = await openTerminal(c.term);
+        S.bookMap[c.term] = parseBookings(main).map((b) => ({ ...b, term: c.term }));
+        return startBooking(c.term, sh.week, c.cellId);
+      }), true).then((mg) => {
+        if (S.sheet !== sh) return;
+        sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
+        sh.lastProbe = c.term;
+        render();
+      }, (e) => {
+        if (S.sheet !== sh) return;
+        if (e.code === 'GONE') { S.sheet = null; toast(sh.flash); render(); pump(); }
+        else { sh.probes[c.term] = { state: 'error', msg: e.message }; render(); }
+      }).finally(() => {
+        saveCache();
+        loadCalendar(c.term, sh.week).then(saveCache, () => {});
+      });
     }, (e) => {
       sh.phase = 'done';
       sh.result = { done: [], left: null, error: e };
@@ -1302,12 +1385,13 @@
   function renderBookSheet(sh) {
     let h = `<div class="sh-title">${esc(fullDay(sh.day))} kl. ${esc(span(sh.from, sh.to))}</div>`;
     if (sh.phase === 'choose') {
+      if (sh.flash) h += `<div class="flash">✓ ${esc(sh.flash)}</div>`;
       // Vaskeri-valg (kun dem med plads, i din rækkefølge)
       h += `<div class="seg-l">${sh.cands.map((c, i) => `<button class="${i === sh.idx ? 'on' : ''}" data-act="probe" data-i="${i}">${esc(shortName(c.term))}</button>`).join('')}</div>`;
       const c = sh.cands[sh.idx];
       const p = sh.probes[c.term] || {};
       if (p.state === 'loading') {
-        h += `<div class="sh-wait"><span class="spinner"></span>${p.waiting ? 'Venter på, at appen bliver færdig med at hente…' : `Ser hvilke maskiner der er ledige på ${esc(shortName(c.term))}…`}</div>`;
+        h += `<div class="sh-wait"><span class="spinner"></span>${activity ? `${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s` : `Ser hvilke maskiner der er ledige på ${esc(shortName(c.term))}…`}</div>`;
       } else if (p.state === 'error') {
         h += `<div class="alert">${esc(p.msg)}</div>`;
         if (sh.idx + 1 < sh.cands.length) h += `<button class="btn-ghost wide" data-act="probe" data-i="${sh.idx + 1}">Prøv ${esc(shortName(sh.cands[sh.idx + 1].term))}</button>`;
@@ -1334,7 +1418,7 @@
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
     } else if (sh.phase === 'booking') {
-      h += `<div class="sh-wait"><span class="spinner"></span>${esc(sh.progress || 'Booker…')}</div>`;
+      h += `<div class="sh-wait"><span class="spinner"></span>${esc(activity ? `${activity.label} … ${Math.floor((Date.now() - activity.since) / 1000)} s` : (sh.progress || 'Booker…'))}</div>`;
     } else if (sh.phase === 'done') {
       const r = sh.result;
       if (r.done.length) {
@@ -1506,7 +1590,9 @@
         <button class="${S.tab === 'status' ? 'on' : ''}" data-act="tab" data-tab="status">${ICONS.status}<span>Status</span></button>
       </nav>` : '',
       sheet,
-      toast: S.toast ? `<div class="toast">${esc(S.toast)}</div>` : '',
+      toast: S.toast ? `<div class="toast">${esc(S.toast)}</div>`
+        : activity && Date.now() - activity.since > 700 && !(S.sheet && S.sheet.kind === 'book')
+          ? `<div class="activity"><span class="spinner"></span>${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s</div>` : '',
     };
     if (!root.firstChild) {
       root.innerHTML = '<header data-part="header"></header><div class="scroll"><main data-part="main"></main></div><div class="part" data-part="nav"></div><div class="part" data-part="sheet"></div><div class="part" data-part="toast"></div>';
@@ -1733,6 +1819,7 @@
   #vt-root .mbtn.own{border-color:var(--accent);background:var(--soft);color:var(--accent)} #vt-root .mbtn.own small{color:var(--accent)}
   #vt-root .mbtn.own.rm{border-color:var(--err);background:var(--errbg);color:var(--err);text-decoration:line-through} #vt-root .mbtn.own.rm small{color:var(--err);text-decoration:none}
   #vt-root .success.small-ok{font-size:15px;padding-top:0}
+  #vt-root .flash{background:var(--okbg);color:var(--ok);border-radius:12px;padding:10px 12px;margin:10px 0 0;font-weight:700;font-size:15px}
   #vt-root .s-more{border:1px solid var(--accent);color:var(--accent);border-radius:10px;padding:7px 10px;font-size:13px;font-weight:700;flex:none;white-space:nowrap}
   #vt-root .sh-wait{display:flex;align-items:center;gap:10px;color:var(--muted);padding:22px 0}
   #vt-root .spinner{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vtspin .8s linear infinite;flex:none;display:inline-block}
@@ -1762,6 +1849,7 @@
   #vt-root nav button{position:relative;flex:1;background:none;border:0;padding:8px 0 9px;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12px}
   #vt-root nav button.on{color:var(--accent);font-weight:600}
   #vt-root nav .badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--accent-fg);font-size:11px;font-weight:700;display:grid;place-items:center}
+  #vt-root .activity{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:var(--card);color:var(--muted);border:1px solid var(--line);padding:7px 12px;border-radius:18px;z-index:19;font-size:13px;white-space:nowrap;box-shadow:var(--shadow);max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis}
   #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
@@ -1778,6 +1866,8 @@
     b.onclick = () => { session.del('off'); location.href = BASE + 'Booking/TerminalSelector.aspx'; };
     document.body.appendChild(b);
   }
+
+  setInterval(() => { if (activity) render(); }, 1000);
 
   async function init() {
     if (!document.body) return;
