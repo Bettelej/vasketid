@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.2
+// @version      0.9.3
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.2'; // skal matche @version øverst
+  const VERSION = '0.9.3'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1876,7 +1876,7 @@
             const v = machineView(m, wash, plan);
             const no = machineNo(m.name);
             const ask = wash && !!term && v.cls === 'ok' && (!plan || !plan.full || (plan.need && !plan.need.includes(no) && !plan.next['*']));
-            if (ask) v.sub = S.planBusy === term || S.planWant.has(term) ? 'Henter…' : 'Tryk for at se hvor længe';
+            if (ask) v.sub = S.planBusy === term || S.planWant.has(term) ? 'Henter…' : ''; // understreget "Ledig" viser, at den kan trykkes
             return { m, v, ask };
           });
           const free = views.filter((x) => x.v.cls === 'ok').length;
@@ -1885,7 +1885,7 @@
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${closed ? 'Lukket' : `${free} af ${g.machines.length} ledige nu`}${busy ? ` · ${busy} i brug` : ''}</span></div>
             <div class="machines">${views.map(({ m, v, ask }) => {
               const inner = `<div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub).replace(/ · /g, '<br>')}</div>` : ''}`;
-              return ask ? `<button class="mach ${v.cls} ask" data-act="plan" data-term="${esc(term)}">${inner}</button>` : `<div class="mach ${v.cls}">${inner}</div>`;
+              return ask ? `<button class="mach ${v.cls} ask" data-act="plan" data-term="${esc(term)}" aria-label="${esc(m.name)} ledig – tryk for at se hvor længe">${inner}</button>` : `<div class="mach ${v.cls}">${inner}</div>`;
             }).join('')}</div></div>`;
         }).join('');
         // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
@@ -2315,7 +2315,7 @@
   #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:0 8px} #vt-root .grp-h span{white-space:nowrap}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
-  #vt-root button.mach{font:inherit;border:0;width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent} #vt-root button.mach .m-sub{text-decoration:underline dotted}
+  #vt-root button.mach{font:inherit;border:0;width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent} #vt-root button.mach .m-state{text-decoration:underline;text-underline-offset:3px}
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
   #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)} #vt-root .mach.closed{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
