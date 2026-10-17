@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.13
+// @version      0.9.14
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -25,7 +25,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.13'; // skal matche @version øverst
+  const VERSION = '0.9.14'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -685,7 +685,9 @@
         method: 'POST', credentials: 'same-origin', body: env, signal: ctrl.signal,
         headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: `"${API_NS}/${op}"` },
       });
-      if (Date.now() - t0 > 4000) markSlow();
+      // Status tager normalt 4–5 s – den er først langsom efter 10 s. Går et kald hurtigt, forsvinder beskeden igen.
+      if (Date.now() - t0 > (op === 'GetMachineGroups' ? 10000 : 4000)) markSlow();
+      else slowUntil = 0;
     } catch (e) {
       if (!ctrl.left) markSlow();
       throw new VtError('NET', e.name === 'AbortError' ? 'vasketur.dk svarer ikke lige nu. Prøv igen.' : 'Ingen forbindelse til vasketur.dk. Tjek dit net.');
@@ -1824,10 +1826,12 @@
   }
   const dateLabel = (ts) => { const d = new Date(ts); return `${d.getDate()}/${d.getMonth() + 1}`; };
   const fullDay = (ts) => (ts == null ? '' : `${dayName(ts, true)} ${dateLabel(ts)}`);
+  // Klokkeslæt i stedet for "lige nu" – teksten står stille, mens siden er åben, så den skal være rigtig senere også.
   const ago = (ts) => {
     if (!ts) return '';
-    const m = Math.round((Date.now() - ts) / 60000);
-    return m < 1 ? 'lige nu' : m < 60 ? `for ${m} min siden` : `kl. ${hhmm(ts)}`;
+    const d = new Date(ts);
+    const today = new Date().toDateString() === d.toDateString();
+    return today ? `kl. ${hhmm(ts)}` : `${d.getDate()}/${d.getMonth() + 1} kl. ${hhmm(ts)}`;
   };
   const machineList = (labels) => {
     const nums = labels.map((l) => (/(\d+)/.exec(l) || [])[1]);
