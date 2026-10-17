@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.10
+// @version      0.9.11
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.10'; // skal matche @version øverst
+  const VERSION = '0.9.11'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -2061,7 +2061,7 @@
     h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
     const hist = store.get('loginHist', []).filter((t) => Date.now() - t < 24 * 3600000);
     h += `<p class="muted small">Logins det sidste døgn: ${hist.length}${hist.length ? ` (seneste kl. ${hhmmOf(hist[hist.length - 1])})` : ''}.</p>`;
-    h += `<p class="muted small">Vasketid version ${VERSION}</p>`;
+    h += `<p class="muted small">v${VERSION}</p>`;
     h += `<div class="sh-foot"><a class="btn-link small" href="${HELP_URL}" target="_blank" rel="noopener">Hjælp og vejledning</a><button class="btn-link small" data-act="original">Åbn den gamle side</button>`;
     if (savedCreds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
     h += '</div>';
