@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.16
+// @version      0.9.17
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -25,7 +25,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.16'; // skal matche @version øverst
+  const VERSION = '0.9.17'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1573,10 +1573,7 @@
     const keys = g.items.map(selKey);
     const allOn = keys.every((k) => S.mineSel.includes(k));
     S.mineSel = allOn ? S.mineSel.filter((k) => !keys.includes(k)) : [...new Set([...S.mineSel, ...keys])];
-    if (g.items.length > 1) {
-      S.mineOpen = allOn ? S.mineOpen.filter((x) => x !== gk) : [...new Set([...S.mineOpen, gk])];
-    }
-    render();
+    render(); // markering folder ikke ud – det gør kun pilen
   }
 
   function toggleMineItem(key) {
@@ -1868,7 +1865,7 @@
             <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
             <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((x) => x.cells[1])))}</div>
           </div>
-          ${multi ? `<button class="mb-fold ${open ? 'open' : ''}" data-act="mine-open" data-k="${esc(gk)}" aria-expanded="${open}" aria-label="${open ? 'Skjul' : 'Vis'} de ${g.items.length} maskiner"><span class="mb-fold-n">${g.items.length}</span><span class="mb-fold-ch">›</span></button>` : ''}
+          ${multi ? `<button class="mb-fold ${open ? 'open' : ''}" data-act="mine-open" data-k="${esc(gk)}" aria-expanded="${open}" aria-label="${open ? 'Skjul' : 'Vis'} de ${g.items.length} maskiner"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>` : ''}
         </div>${sub}
       </div>`;
     }).join('');
@@ -2452,13 +2449,11 @@
   #vt-root .mb-check.all,#vt-root .mb-check.some,#vt-root .mb-item.sel .mb-check{background:var(--err);border-color:var(--err);color:#fff}
   #vt-root .mb-check.small{width:24px;height:24px;font-size:13px}
   #vt-root .mb-main[data-act]{cursor:pointer}
-  /* Fold-ud er sin egen zone yderst til højre (hele rækkens højde), adskilt fra markeringen med en streg. */
-  #vt-root .mb-fold{align-self:stretch;margin:-12px -12px -12px 0;width:56px;border:0;border-left:1px solid var(--line);background:var(--soft);color:var(--accent);border-radius:0 13px 13px 0;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;padding:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
-  #vt-root .mb-fold:active{filter:brightness(.95)}
-  #vt-root .mb-fold.open{border-bottom-right-radius:0}
-  #vt-root .mb-fold-n{font-size:12px;font-weight:700;line-height:1}
-  #vt-root .mb-fold-ch{font-size:22px;line-height:1;transition:transform .15s;transform:rotate(90deg)}
-  #vt-root .mb-fold.open .mb-fold-ch{transform:rotate(-90deg)}
+  /* Som Material-lister: markering til venstre, fold-ud som egen ikonknap til højre (pil ned = lukket, op = åben). */
+  #vt-root .mb-fold{width:44px;height:44px;margin:-6px -6px -6px 0;border:0;border-radius:22px;background:none;color:var(--muted);flex:none;display:grid;place-items:center;padding:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  #vt-root .mb-fold:active{background:var(--soft)}
+  #vt-root .mb-fold svg{transition:transform .15s}
+  #vt-root .mb-fold.open svg{transform:rotate(180deg)}
   #vt-root .mb-items{margin:8px 0 0 40px;display:flex;flex-direction:column;gap:6px}
   #vt-root .mb-item{display:flex;align-items:center;gap:10px;font-size:15px;padding:4px 0;cursor:pointer}
   #vt-root .mb-check.small{display:grid;place-items:center}
