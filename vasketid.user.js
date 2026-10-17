@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.9
+// @version      0.9.0
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.9'; // skal matche @version øverst
+  const VERSION = '0.9.0'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -862,7 +862,8 @@
 
   // Dagens resterende tidsrum for ét vaskeri: hvilke maskiner er booket nu, og hvornår næste gang.
   // Læser kun maskinvalget – der bookes ikke noget.
-  async function apiPlanDay(term, need) {
+  // full = false: kun det igangværende tidsrum (er en ledig maskine booket lige nu?). full = true: også "ledig til".
+  async function apiPlanDay(term, need, full = true) {
     const next = {};
     const now = {};
     if (need && !need.length) return { next, now, need }; // ingen ledige maskiner – intet at slå op
@@ -876,6 +877,7 @@
       if (known && known.every((n) => now[n] || next[n])) break; // alle ledige maskiner har fået svar
       if (toMin(p.to) <= nowMin()) continue;
       const current = toMin(p.from) <= nowMin();
+      if (!full && !current) break;
       let booked;
       if (!p.free) booked = known || ['*']; // helt optaget ifølge kalenderen – ingen ekstra kald
       else {
@@ -896,7 +898,7 @@
         else if (!next[n]) next[n] = p.from;
       }
     }
-    return { next, now, need: known };
+    return { next, now, need: full ? known : [] };
   }
 
 
@@ -926,7 +928,8 @@
     bookMap: store.get('bookMap', {}), // vaskeri -> [{key, cells, term}]
     bookingsAt: store.get('bookingsAt', null),
     dayPlan: store.get('dayPlan', {}), // vaskeri -> {day, at, next: {maskinnr: 'HH:MM'}} – næste booking i dag pr. maskine
-    planBusy: false,
+    planBusy: false, // vaskeriet der slås op lige nu
+    planWant: new Set(), // vaskerier man har trykket på for at se "ledig til"
     mineSel: [], // markerede maskiner på Mine (bookingnøgler)
     mineOpen: [], // udfoldede tider på Mine (gruppenøgler)
     status: store.get('status', null),
@@ -1093,39 +1096,53 @@
     return next;
   }
 
+  // Kun maskiner der er ledige nu kan have "ledig til" – de andre slås ikke op.
+  function needOf(term) {
+    const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
+    const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
+    return G ? G.machines.filter((m) => machineView(m, true, null).cls === 'ok').map((m) => machineNo(m.name)) : null;
+  }
+  // Automatisk: om en ledig maskine er booket lige nu (få kald). "Ledig til" hentes først, når man trykker på en maskine.
   async function refreshDayPlan() {
     if (S.planBusy) return;
     const today = dayTs(0);
-    // Kun maskiner der er ledige nu skal have "ledig til" – de andre slås ikke op.
-    const needOf = (term) => {
-      const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
-      const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
-      return G ? G.machines.filter((m) => machineView(m, true, null).cls === 'ok').map((m) => machineNo(m.name)) : null;
+    const pass = (passNow() || [])[0] || '';
+    const fresh = (p) => p && p.day === today && p.pass === pass && Date.now() - p.at < 5 * 60000;
+    const jobs = () => {
+      const out = [];
+      for (const t of [...new Set([...S.planWant, ...ordered()])]) {
+        const p = S.dayPlan[t];
+        if (S.planWant.has(t)) {
+          const need = needOf(t);
+          if (!fresh(p) || !p.full || (need && (!p.need || need.some((n) => !p.need.includes(n))))) out.push([t, true]);
+          else S.planWant.delete(t);
+        } else if (apiReady() && !fresh(p)) out.push([t, false]);
+      }
+      return out.sort((x, y) => y[1] - x[1]); // tryk først
     };
-    const todo = ordered().filter((t) => {
-      const p = S.dayPlan[t];
-      if (!p || p.day !== today || Date.now() - p.at > 5 * 60000) return true;
-      const need = needOf(t);
-      return !!need && (!p.need || need.some((n) => !p.need.includes(n))); // en maskine er blevet ledig siden
-    });
-    if (!todo.length) return;
-    S.planBusy = true;
-    render();
     try {
-      for (const term of todo) {
+      for (let j = jobs(); j.length; j = jobs()) {
+        const [term, full] = j[0];
+        S.planBusy = term;
+        render();
         const need = needOf(term);
-        const plan = apiReady() ? await apiPlanDay(term, need) : { next: await planDay(term, need), need };
-        S.dayPlan[term] = { day: today, at: Date.now(), ...plan };
+        let plan;
+        try {
+          plan = apiReady() ? await apiPlanDay(term, need, full) : { next: await planDay(term, need), now: {}, need };
+        } catch (e) {
+          plan = { next: {}, now: {}, need: [], failed: true }; // ikke kritisk – status vises bare uden tidspunkter
+        }
+        S.dayPlan[term] = { day: today, pass, at: Date.now(), full: full && !plan.failed, ...plan };
+        if (full) S.planWant.delete(term); // et automatisk opslag må ikke sluge et tryk
         render();
       }
       saveCache();
-    } catch (e) {
-      // Ikke kritisk – status vises bare uden tidspunkter.
     } finally {
       S.planBusy = false;
       render();
     }
   }
+
 
   async function refreshStatus() {
     if (S.statusBusy) return;
@@ -1852,17 +1869,27 @@
       const order = ordered();
       const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 50 + hillRank(n) : i; };
       const ls = [...S.status.laundries].sort((a, b) => rank(a.name) - rank(b.name));
-      html += `<p class="muted small status-upd">Opdateret ${esc(ago(S.status.at))}.${S.planBusy ? ' Henter dagens bookinger…' : ''}</p>`;
+      html += `<p class="muted small status-upd">Opdateret ${esc(ago(S.status.at))}.${S.planBusy ? ' Tjekker bookinger…' : ''}</p>`;
       for (const L of ls) {
         const groups = L.groups.map((g) => {
           const term = S.terms.find((t) => sameLaundry(t, L.name));
           const plan = term && S.dayPlan[term] && S.dayPlan[term].day === dayTs(0) ? S.dayPlan[term] : null;
-          const views = g.machines.map((m) => ({ m, v: machineView(m, !/tørre/i.test(g.type), plan) }));
+          const wash = !/tørre/i.test(g.type);
+          const views = g.machines.map((m) => {
+            const v = machineView(m, wash, plan);
+            const no = machineNo(m.name);
+            const ask = wash && !!term && v.cls === 'ok' && (!plan || !plan.full || (plan.need && !plan.need.includes(no) && !plan.next['*']));
+            if (ask) v.sub = S.planBusy === term || S.planWant.has(term) ? 'Henter…' : 'Tryk for at se hvor længe';
+            return { m, v, ask };
+          });
           const free = views.filter((x) => x.v.cls === 'ok').length;
           const busy = views.filter((x) => x.v.cls === 'run').length;
           const closed = views.every((x) => x.v.cls === 'closed' || x.v.cls === 'run');
           return `<div class="grp"><div class="grp-h">${esc(g.type)} <span class="muted">${closed ? 'Lukket' : `${free} af ${g.machines.length} ledige nu`}${busy ? ` · ${busy} i brug` : ''}</span></div>
-            <div class="machines">${views.map(({ m, v }) => `<div class="mach ${v.cls}"><div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub).replace(/ · /g, '<br>')}</div>` : ''}</div>`).join('')}</div></div>`;
+            <div class="machines">${views.map(({ m, v, ask }) => {
+              const inner = `<div class="m-name">${esc(m.name)}</div><div class="m-state">${esc(v.label)}</div>${v.sub ? `<div class="m-sub">${esc(v.sub).replace(/ · /g, '<br>')}</div>` : ''}`;
+              return ask ? `<button class="mach ${v.cls} ask" data-act="plan" data-term="${esc(term)}">${inner}</button>` : `<div class="mach ${v.cls}">${inner}</div>`;
+            }).join('')}</div></div>`;
         }).join('');
         // Status-siden staver nogle navne forkert (fx "Sokkellundsvej") – vis navnet fra vaskeri-listen.
         const name = S.terms.find((t) => sameLaundry(t, L.name)) || L.name;
@@ -2168,6 +2195,7 @@
         if (S.tab === 'status') refreshStatus(); else refresh();
         break;
       case 'status-retry': refreshStatus(); break;
+      case 'plan': S.planWant.add(el.dataset.term); render(); refreshDayPlan(); break;
       case 'settings': S.sheet = { kind: 'settings' }; render(); break;
       case 'day': selectDay(+el.dataset.ts); break;
       case 'day-step': stepDay(+el.dataset.d); break;
@@ -2290,6 +2318,7 @@
   #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:0 8px} #vt-root .grp-h span{white-space:nowrap}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
+  #vt-root button.mach{font:inherit;border:0;width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent} #vt-root button.mach .m-sub{text-decoration:underline dotted}
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
   #vt-root .mach.run{background:var(--runbg);color:var(--run)} #vt-root .mach.err{background:var(--errbg);color:var(--err)} #vt-root .mach.closed{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
