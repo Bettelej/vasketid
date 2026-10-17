@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.1
+// @version      0.9.2
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.1'; // skal matche @version øverst
+  const VERSION = '0.9.2'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1190,8 +1190,8 @@
       const d = c.days.indexOf(ts);
       if (d < 0) continue;
       for (const cell of c.cells.filter((x) => x.d === d)) {
-        const [h, m] = (cell.to || '23:59').split(':').map(Number);
-        if (new Date(ts).setHours(h, m) < now) continue; // forbi
+        const [h, m] = (cell.from || '23:59').split(':').map(Number);
+        if (new Date(ts).setHours(h, m) <= now) continue; // forbi eller i gang – kan ikke bookes
         const k = cell.from + '–' + cell.to;
         if (!map.has(k)) map.set(k, { from: cell.from, to: cell.to, week, items: [], own: [] });
         map.get(k).items.push({ term, cell });
