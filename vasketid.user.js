@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.7
+// @version      0.8.8
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.7'; // skal matche @version øverst
+  const VERSION = '0.8.8'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -493,7 +493,7 @@
   }
 
   async function loadStatusOnce() {
-    step(statusLabel(' (vasketur.dk er langsom her)'));
+    step(statusLabel());
     let base = cur && cur.doc.querySelector('a[href*="LinkStatus"]') ? cur : null;
     if (!base) {
       const sel = await selector();
@@ -1099,7 +1099,7 @@
     for (let attempt = 1; attempt <= 3; attempt++) {
       statusAttempt = attempt;
       S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen (${attempt} af 3)…`
-        : apiReady() ? 'Henter status…' : 'Henter status… vasketur.dk er langsom her, det kan tage op til 20 sekunder.';
+        : apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
       render();
       try {
         S.status = await serial(() => viaApi(apiStatus, () => withSession(loadStatusOnce), 'status'), true);
