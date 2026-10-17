@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.8
+// @version      0.8.9
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.8'; // skal matche @version øverst
+  const VERSION = '0.8.9'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -681,10 +681,11 @@
   const fmtMachine = (s) => String(s || '').trim().replace(/^(Vask|Tør)\s*(\d)/i, '$1 $2');
 
   // IsFree = mindst én maskine ledig i tidsrummet; IsBookable = tidsrummet kan bookes (ikke forbi/lukket).
+  const calDaysCache = {}; // vaskeri -> {days, at}: senest hentede kalender fra i dag (genbruges af Status)
   async function apiCalDays(term, fromOff, toOff) {
     await apiUnit(term);
     const res = await apiCall('GetBookingCalendarDays', { startDate: xd(isoDay(dayTs(fromOff))), endDate: xd(isoDay(dayTs(toOff))) }, 20000);
-    return [...res.getElementsByTagNameNS(API_NS, 'BookDay')].map((b) => {
+    const days = [...res.getElementsByTagNameNS(API_NS, 'BookDay')].map((b) => {
       const date = tx(b, 'BookDate').slice(0, 10);
       return {
         ts: isoTs(date),
@@ -694,6 +695,8 @@
         })),
       };
     });
+    if (fromOff === 0) calDaysCache[term] = { days, at: Date.now() };
+    return days;
   }
 
   async function apiBookings(term) {
@@ -746,7 +749,17 @@
   }
 
   // Maskinvalget for et tidsrum (booker ikke noget). Trinene skal tages i denne rækkefølge.
-  async function apiMachinesAt(term, ref) {
+  // Senest sete maskinvalg pr. tidsrum – Status genbruger dem i stedet for at spørge igen.
+  const mgCache = {};
+  const MG_FRESH = 5 * 60000;
+  const mgKey = (term, ref) => `${term}|${ref.date}|${ref.pi}`;
+  // Efter booking/afbestilling er alt, vi har set for vaskeriet, forældet.
+  function forgetTerm(term) {
+    delete S.dayPlan[term];
+    delete calDaysCache[term];
+    Object.keys(mgCache).forEach((k) => { if (k.startsWith(term + '|')) delete mgCache[k]; });
+  }
+  async function apiMachinesAt(term, ref, counters = true) {
     await apiUnit(term);
     step(`Henter maskiner · ${shortName(term)}`);
     if (code(await apiCall('SetBookPass', { SystemDate: xd(ref.date), passindex: xi(ref.pi) }))) throw new VtError('API', 'Kunne ikke vælge tidsrummet');
@@ -755,13 +768,15 @@
     await apiCall('SetBookMachineGroupTypes', { typeindex: xi(0) });
     const names = list(await apiCall('GetNextBookMachineGroups')).slice(1);
     const free = list(await apiCall('GetBookMachineGroupsFree')).slice(1); // 1 = ledig
-    const left = list(await apiCall('GetBookMachineGroupsCountersLeft'))[1];
-    return {
+    const left = counters ? list(await apiCall('GetBookMachineGroupsCountersLeft'))[1] : null; // kun til bookingvinduet
+    const mg = {
       api: true,
       quota: left != null && +left < 9999 ? +left : null,
       random: null,
       options: names.map((n, i) => ({ name: String(i), label: fmtMachine(n), disabled: free[i] !== '1' })),
     };
+    mgCache[mgKey(term, ref)] = { mg, at: Date.now() };
+    return mg;
   }
 
   async function apiMachines(term, week, cellId) {
@@ -847,31 +862,43 @@
 
   // Dagens resterende tidsrum for ét vaskeri: hvilke maskiner er booket nu, og hvornår næste gang.
   // Læser kun maskinvalget – der bookes ikke noget.
-  async function apiPlanDay(term, nums) {
-    const days = await serial(() => apiRun(() => apiCalDays(term, 0, 0)));
-    const passes = days.length ? days[0].passes : [];
+  async function apiPlanDay(term, need) {
     const next = {};
     const now = {};
-    let known = nums ? [...nums] : null;
+    if (need && !need.length) return { next, now, need }; // ingen ledige maskiner – intet at slå op
+    const cached = calDaysCache[term];
+    const days = cached && Date.now() - cached.at < 60000 && cached.days.length && cached.days[0].ts === dayTs(0)
+      ? cached.days // Book har lige hentet kalenderen
+      : await serial(() => apiRun(() => apiCalDays(term, 0, 0)));
+    const passes = days.length ? days[0].passes : [];
+    let known = need ? [...need] : null;
     for (const p of passes) {
+      if (known && known.every((n) => now[n] || next[n])) break; // alle ledige maskiner har fået svar
       if (toMin(p.to) <= nowMin()) continue;
       const current = toMin(p.from) <= nowMin();
       let booked;
-      if (!p.free) booked = known || ['*'];
+      if (!p.free) booked = known || ['*']; // helt optaget ifølge kalenderen – ingen ekstra kald
       else {
-        const mg = await serial(() => apiRun(() => apiMachinesAt(term, { date: p.date, pi: p.pi }))).catch(() => null);
+        const ref = { date: p.date, pi: p.pi };
+        const hit = mgCache[mgKey(term, ref)];
+        const mg = hit && Date.now() - hit.at < MG_FRESH ? hit.mg
+          : await serial(() => apiRun(() => apiMachinesAt(term, ref, false)))
+            .catch((e) => (e.code === 'GONE' ? { options: null } : null));
         if (!mg) continue;
-        if (!known) known = mg.options.map((o) => machineNo(o.label));
-        booked = mg.options.filter((o) => o.disabled).map((o) => machineNo(o.label));
+        if (!mg.options) booked = known || ['*']; // ingen ledige maskiner i tidsrummet
+        else {
+          if (!known) known = mg.options.map((o) => machineNo(o.label));
+          booked = mg.options.filter((o) => o.disabled).map((o) => machineNo(o.label));
+        }
       }
       for (const n of booked) {
         if (current) now[n] = true;
         else if (!next[n]) next[n] = p.from;
       }
-      if (known && known.every((n) => next[n])) break;
     }
-    return { next, now };
+    return { next, now, need: known };
   }
+
 
   // ---------------------------------------------------------------------------
   // Tilstand og dataindlæsning
@@ -1011,7 +1038,6 @@
         timings.push({ label: 'opdatér alt', via: apiReady() ? 'api' : 'web', ms: Date.now() - t0 });
         S.bookingsAt = Date.now();
         saveCache();
-        refreshDayPlan(); // så Status har tidspunkterne klar
       } catch (e) {
         handleError(e);
       } finally {
@@ -1028,6 +1054,7 @@
   // Går dagens resterende vasketider igennem for ét vaskeri og finder første booking pr. maskine.
   // Åbner kun maskinvalget (som når man trykker Book) – der bookes ikke noget.
   async function planDay(term, nums) {
+    if (nums && !nums.length) return {}; // ingen ledige maskiner – intet at slå op
     const parsed = await serial(() => withSession(async () => {
       const p = parseCalendar(await gotoCalendar(term, 0), 0);
       S.cal[term + '|0'] = p;
@@ -1069,16 +1096,25 @@
   async function refreshDayPlan() {
     if (S.planBusy) return;
     const today = dayTs(0);
-    const todo = ordered().filter((t) => { const p = S.dayPlan[t]; return !p || p.day !== today || Date.now() - p.at > 5 * 60000; });
+    // Kun maskiner der er ledige nu skal have "ledig til" – de andre slås ikke op.
+    const needOf = (term) => {
+      const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
+      const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
+      return G ? G.machines.filter((m) => machineView(m, true, null).cls === 'ok').map((m) => machineNo(m.name)) : null;
+    };
+    const todo = ordered().filter((t) => {
+      const p = S.dayPlan[t];
+      if (!p || p.day !== today || Date.now() - p.at > 5 * 60000) return true;
+      const need = needOf(t);
+      return !!need && (!p.need || need.some((n) => !p.need.includes(n))); // en maskine er blevet ledig siden
+    });
     if (!todo.length) return;
     S.planBusy = true;
     render();
     try {
       for (const term of todo) {
-        const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
-        const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
-        const nums = G ? G.machines.map((m) => machineNo(m.name)) : null;
-        const plan = apiReady() ? await apiPlanDay(term, nums) : { next: await planDay(term, nums) };
+        const need = needOf(term);
+        const plan = apiReady() ? await apiPlanDay(term, need) : { next: await planDay(term, need), need };
         S.dayPlan[term] = { day: today, at: Date.now(), ...plan };
         render();
       }
@@ -1198,12 +1234,13 @@
   const machinesFor = (term, week, cellId) => viaApi(
     () => apiMachines(term, week, cellId), () => withSession(() => startBooking(term, week, cellId)), 'maskinvalg');
   const cancelFor = (term, keys) => viaApi(
-    () => apiCancelMany(term, keys), () => withSession(() => cancelMany(term, keys)), `afbestil ${keys.length}`);
+    () => apiCancelMany(term, keys), () => withSession(() => cancelMany(term, keys)), `afbestil ${keys.length}`)
+    .finally(() => forgetTerm(term));
   // Booking falder ikke tilbage midt i et forløb – fejl vises, og man kan prøve igen (så via websiden).
   const bookFor = (term, week, cellId, labels, fresh, onProgress) => viaApi(
     () => apiBookMany(term, week, cellId, labels, onProgress),
     () => bookMachines(term, week, cellId, labels, fresh && !fresh.api ? fresh : null, onProgress),
-    `book ${labels.length}`, false);
+    `book ${labels.length}`, false).finally(() => forgetTerm(term));
 
   function freeLabels(mg) { return mg.options.filter((o) => !o.disabled).map((o) => o.label); }
 
@@ -1797,6 +1834,7 @@
     }
     if (cls === 'ok') {
       if (!bookable || !plan) return { cls, label: 'Ledig', sub: '' };
+      if (plan.need && !plan.need.includes(machineNo(m.name)) && !plan.next['*']) return { cls, label: 'Ledig', sub: '' }; // ikke slået op endnu
       const at = plan.next[machineNo(m.name)] || plan.next['*'];
       return { cls, label: 'Ledig', sub: at ? `til kl. ${shortTime(at)}` : 'resten af dagen' };
     }
