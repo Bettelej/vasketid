@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.7
+// @version      0.9.8
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.7'; // skal matche @version øverst
+  const VERSION = '0.9.8'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -769,6 +769,7 @@
   const mgKey = (term, ref) => `${term}|${ref.date}|${ref.pi}`;
   // Efter booking/afbestilling er alt, vi har set for vaskeriet, forældet.
   function forgetTerm(term) {
+    Object.keys(probeCache).forEach((k) => { if (k.startsWith(term + '|')) delete probeCache[k]; });
     delete S.dayPlan[term];
     delete calDaysCache[term];
     Object.keys(mgCache).forEach((k) => { if (k.startsWith(term + '|')) delete mgCache[k]; });
@@ -1241,6 +1242,18 @@
     probe(start);
   }
 
+  // Maskinlisten for et tidsrum genbruges i 5 min, når man åbner det igen. Booking tjekker altid frisk.
+  const PROBE_MS = 5 * 60000;
+  const probeCache = {};
+  const probeKey = (sh, term) => `${term}|${sh.day}|${sh.from}`;
+  function reprobe() {
+    const sh = S.sheet;
+    if (!sh || sh.kind !== 'book' || sh.phase !== 'choose') return;
+    const c = sh.cands[sh.idx];
+    delete probeCache[probeKey(sh, c.term)];
+    delete sh.probes[c.term];
+    probe(sh.idx);
+  }
   function probe(idx) {
     const sh = S.sheet;
     if (!sh || sh.kind !== 'book') return;
@@ -1249,6 +1262,13 @@
     const c = sh.cands[idx];
     const p = sh.probes[c.term];
     if (p && p.state === 'ok') { preselect(); render(); return; }
+    const hit = probeCache[probeKey(sh, c.term)];
+    if (hit && Date.now() - hit.at < PROBE_MS) {
+      sh.probes[c.term] = { state: 'ok', mg: hit.mg, at: hit.at };
+      preselect();
+      render();
+      return;
+    }
     sh.probes[c.term] = { state: 'loading', waiting: running };
     render();
     serial(() => {
@@ -1257,6 +1277,7 @@
     }, true).then((mg) => {
       if (S.sheet !== sh) return;
       sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
+      probeCache[probeKey(sh, c.term)] = { mg, at: Date.now() };
       sh.lastProbe = c.term; // serveren står nu på dette vaskeris maskinvalg
       if (sh.idx === idx) preselect();
       render();
@@ -1333,7 +1354,7 @@
     sh.progress = removeItems.length ? 'Afbestiller…' : `Booker ${labels[0]}…`;
     render();
     // Maskinvalgs-siden er kun gyldig, hvis serveren ikke har flyttet sig siden (gælder kun det senest undersøgte vaskeri).
-    const fresh = sh.lastProbe === c.term && !removeItems.length ? p.mg : null;
+    const fresh = sh.lastProbe === c.term && !removeItems.length && Date.now() - (p.at || 0) < 60000 ? p.mg : null;
     serial(async () => {
       let cancelled = [];
       if (removeItems.length) {
@@ -1377,6 +1398,7 @@
       })), true).then((mg) => {
         if (S.sheet !== sh) return;
         sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
+        probeCache[probeKey(sh, c.term)] = { mg, at: Date.now() };
         sh.lastProbe = c.term;
         render();
       }, (e) => {
@@ -1970,6 +1992,10 @@
               : (mine.length ? 'Vælg flere maskiner' : 'Vælg mindst én maskine');
         h += `<button class="${m && !n ? 'btn-danger' : 'btn-primary'} big" data-act="do-book" ${n || m ? '' : 'disabled'}>${label}</button>`;
         if (p.mg.quota != null) h += `<div class="muted small center">Du kan booke ${p.mg.quota} maskine${p.mg.quota === 1 ? '' : 'r'} mere på ${esc(shortName(c.term))}.</div>`;
+        const left = Math.ceil((PROBE_MS - (Date.now() - (p.at || 0))) / 1000);
+        h += left > 0
+          ? `<div class="muted small center">Opdateres om ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</div>`
+          : '<div class="muted small center">Listen er over 5 min gammel. <button class="btn-link small" data-act="reprobe">Opdatér</button></div>';
       }
       h += '<button class="btn-link" data-act="close-sheet">Fortryd</button>';
     } else if (sh.phase === 'booking') {
@@ -2223,6 +2249,7 @@
       case 'day-step': stepDay(+el.dataset.d); break;
       case 'book': openBooking(el.dataset.from, +el.dataset.ts); break;
       case 'probe': probe(+el.dataset.i); break;
+      case 'reprobe': reprobe(); break;
       case 'machine': toggleMachine(el.dataset.label); break;
       case 'machine-own': toggleOwn(el.dataset.no); break;
       case 'count': setCount(S.count + +el.dataset.d); break;
@@ -2441,7 +2468,12 @@
     document.body.appendChild(b);
   }
 
-  setInterval(() => { if (activity) render(); }, 1000);
+  setInterval(() => {
+    const sh = S.sheet;
+    const p = sh && sh.kind === 'book' && sh.phase === 'choose' ? sh.probes[sh.cands[sh.idx].term] : null;
+    if (p && p.state === 'ok' && Date.now() - (p.at || 0) >= PROBE_MS && !sh.sel.length && !sh.remove.length) reprobe();
+    else if (activity || p) render();
+  }, 1000);
 
   async function init() {
     if (!document.body) return;
