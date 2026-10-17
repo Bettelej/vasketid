@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.6
+// @version      0.8.0
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.7.6'; // skal matche @version øverst
+  const VERSION = '0.8.0'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -199,7 +199,8 @@
   }
 
   // --- Login ---
-  const creds = () => store.get('creds', null);
+  const savedCreds = () => store.get('creds', null);
+  const creds = () => savedCreds() || memCreds;
 
   async function login(user, pass) {
     selCache = null;
@@ -371,10 +372,14 @@
   async function startBooking(term, week, cellId, retry = true) {
     try {
       const cal = await gotoCalendar(term, week);
-      const cell = parseCalendar(cal, week).cells.find((c) => c.id === cellId);
+      const parsed = parseCalendar(cal, week);
+      // Celle-id fra API'et ("dato|pass|fra") findes via dag og starttid.
+      const [date, , from] = String(cellId).split('|');
+      const cell = parsed.cells.find((c) => c.id === cellId)
+        || (from && parsed.cells.find((c) => parsed.days[c.d] === isoTs(date) && c.from === from));
       if (!cell || !cell.bookable) throw new VtError('GONE', 'Tiden er ikke længere ledig her.');
       step(`Henter maskiner · ${shortName(term)}`);
-      return parseMachineGroup(await postback(cal, 'BookPass' + cellId, cellId));
+      return parseMachineGroup(await postback(cal, 'BookPass' + cell.id, cell.id));
     } catch (e) {
       if (!retry || e.code === 'LOGIN' || e.code === 'GONE') throw e;
       ctx = null; // genvejen holdt ikke – tag den lange vej én gang
@@ -420,13 +425,15 @@
     step(`Afbestiller · ${shortName(term)}`);
     let page = await openTerminal(term);
     const failed = [];
+    // Nøglen kan stamme fra API'et (anden tekst for datoen) – sammenlign også på dato, maskine og tid.
+    const same = (x, key) => x.key === key || bookingSig(x) === keySig(key);
     for (const key of keys) {
-      const row = parseBookings(page).find((x) => x.key === key);
+      const row = parseBookings(page).find((x) => same(x, key));
       if (!row) continue; // allerede væk
       const el = page.doc.getElementsByName(row.id)[0] || page.doc.querySelector(`a[href*="${row.id}"]`);
       try {
         page = await activate(page, el);
-        if (parseBookings(page).some((x) => x.key === key)) failed.push(key);
+        if (parseBookings(page).some((x) => same(x, key))) failed.push(key);
       } catch (e) {
         failed.push(key);
         if (e.code === 'LOGIN') throw e;
@@ -474,6 +481,324 @@
     }
     // Status-siden er langsom hos vasketur.dk (10–20 sek.), så den får længere tidsgrænse.
     return parseStatus(await post(base, { __EVENTTARGET: 'ctl00$LinkStatus', __EVENTARGUMENT: '' }, false, 45000));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mobil-API: samme SOAP-tjeneste som den officielle app (VisionMobile.asmx, samme server).
+  // Svarer på 20–700 ms mod 0,4–1,2 sek. pr. webside. Kræver navn+kode (gemt via "Husk mig" eller
+  // tastet i denne session). Fejler API'et, falder appen tilbage til websiderne ovenfor.
+  // ---------------------------------------------------------------------------
+
+  const API_URL = BASE + 'Api/Mobile/VisionMobile.asmx';
+  const API_NS = 'http://www.rco.se/Api/Mobile';
+  const api = { guid: null, units: null, unit: -1, broken: '', off: false };
+  let memCreds = null; // login tastet i denne session – kun i hukommelsen
+  const timings = []; // målinger til test: {label, via, ms}
+
+  // Parametre skal have xsi:type – ellers svarer serveren med fejl 500.
+  const xs = (v) => ['string', v];
+  const xi = (v) => ['int', v];
+  const xl = (v) => ['long', v];
+  const xd = (iso) => ['dateTime', iso + 'T00:00:00'];
+  const xmlEsc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+  async function soap(op, params = {}, timeout = 15000) {
+    const body = Object.entries(params).map(([k, [t, v]]) => `<${k} xsi:type="xsd:${t}">${xmlEsc(v)}</${k}>`).join('');
+    const env = '<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+      + `<soap:Body><${op} xmlns="${API_NS}">${body}</${op}></soap:Body></soap:Envelope>`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    let r;
+    try {
+      r = await fetch(API_URL, {
+        method: 'POST', credentials: 'same-origin', body: env, signal: ctrl.signal,
+        headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: `"${API_NS}/${op}"` },
+      });
+    } catch (e) {
+      throw new VtError('NET', e.name === 'AbortError' ? 'vasketur.dk svarer ikke lige nu. Prøv igen.' : 'Ingen forbindelse til vasketur.dk. Tjek dit net.');
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) throw new VtError('API', `API-fejl ${r.status} (${op})`);
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
+    const res = doc.getElementsByTagNameNS(API_NS, op + 'Result')[0];
+    if (!res) throw new VtError('API', `Uventet svar fra API (${op})`);
+    return res;
+  }
+
+  const tx = (el, name) => { const e = el.getElementsByTagNameNS(API_NS, name)[0]; return e ? e.textContent.trim() : ''; };
+  const list = (el) => [...el.children].map((c) => c.textContent.trim()); // ArrayOfAnyType
+  // Negativ kode i svaret (-1 = forkert rækkefølge/indeks, -2 = sessionen er udløbet), ellers 0.
+  function code(el) {
+    const v = (el.children.length ? el.children[0].textContent : el.textContent).trim();
+    return /^-\d+$/.test(v) ? +v : 0;
+  }
+
+  async function apiCall(op, params = {}, timeout, guidName = 'loginguid') {
+    const res = await soap(op, { [guidName]: xs(api.guid), ...params }, timeout);
+    if (code(res) === -2) { api.guid = null; throw new VtError('APISESSION', 'API-sessionen er udløbet'); }
+    return res;
+  }
+
+  async function apiConnect() {
+    const c = creds();
+    if (!c) throw new VtError('LOGIN', 'Du er ikke logget ind');
+    step('Logger ind');
+    api.guid = null;
+    api.unit = -1;
+    const res = await soap('Login', { systemname: xs('DB0073-ABMonten'), username: xs(c.user), Password: xs(c.pass), timeout: xi(600) });
+    const g = (/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.exec(res.textContent) || [])[0];
+    // Tomt svar kan både være forkert kode og en fejl hos API'et – websiden afgør det bagefter.
+    if (!g) throw new VtError('API', 'API-login gav intet svar');
+    api.guid = g;
+    api.units = list(await apiCall('GetBookUnits')).slice(1);
+  }
+
+  // Kører fn mod API'et; logger ind (igen), hvis sessionen mangler eller er udløbet.
+  async function apiRun(fn) {
+    if (!api.guid) await apiConnect();
+    try {
+      return await fn();
+    } catch (e) {
+      if (e.code !== 'APISESSION') throw e;
+      await apiConnect();
+      return fn();
+    }
+  }
+
+  const apiReady = () => !api.off && !api.broken && !!(api.guid || creds());
+
+  // Bruger API'et når det kan; ved uventede API-fejl skiftes til websiderne resten af sessionen.
+  async function viaApi(apiFn, webFn, label, fallback = true) {
+    const t0 = performance.now();
+    let via = 'web';
+    try {
+      if (apiReady()) {
+        via = 'api';
+        try {
+          return await apiRun(apiFn);
+        } catch (e) {
+          if (!['API', 'APISESSION'].includes(e.code)) throw e;
+          api.broken = e.message || 'API-fejl';
+          if (!fallback) throw new VtError(e.code, 'Noget gik galt. Tjek "Mine" og prøv igen.');
+          via = 'api→web';
+        }
+      }
+      return await webFn();
+    } finally {
+      if (label) {
+        timings.push({ label, via, ms: Math.round(performance.now() - t0) });
+        if (timings.length > 200) timings.shift();
+      }
+    }
+  }
+
+  // Vælger vaskeri på API-sessionen (som "Bestil vask <vaskeri>" i appen).
+  async function apiUnit(term) {
+    const i = api.units.findIndex((u) => sameLaundry(u, term));
+    if (i < 0) throw new VtError('API', `API kender ikke ${shortName(term)}`);
+    if (api.unit === i) return;
+    api.unit = -1;
+    step(`Åbner ${shortName(term)}`);
+    await apiCall('ConnectToUnit', { unitindex: xl(i) });
+    await apiCall('GetBookPrechoices'); // skal hentes før valget accepteres
+    if (code(await apiCall('SetBookPrechoises', { prechoiseindex: xi(0) }))) throw new VtError('API', 'Kunne ikke vælge vaskeriet');
+    api.unit = i;
+  }
+
+  const isoDay = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const isoTs = (s) => { const [y, m, d] = s.slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+  const fmtMachine = (s) => String(s || '').trim().replace(/^(Vask|Tør)\s*(\d)/i, '$1 $2');
+
+  // IsFree = mindst én maskine ledig i tidsrummet; IsBookable = tidsrummet kan bookes (ikke forbi/lukket).
+  async function apiCalDays(term, fromOff, toOff) {
+    await apiUnit(term);
+    const res = await apiCall('GetBookingCalendarDays', { startDate: xd(isoDay(dayTs(fromOff))), endDate: xd(isoDay(dayTs(toOff))) }, 20000);
+    return [...res.getElementsByTagNameNS(API_NS, 'BookDay')].map((b) => {
+      const date = tx(b, 'BookDate').slice(0, 10);
+      return {
+        ts: isoTs(date),
+        passes: [...b.getElementsByTagNameNS(API_NS, 'BookDayPass')].map((p) => ({
+          date, pi: +tx(p, 'PassIndex'), from: tx(p, 'StartTime'), to: tx(p, 'EndTime'),
+          free: tx(p, 'IsFree') === 'true', open: tx(p, 'IsBookable') === 'true',
+        })),
+      };
+    });
+  }
+
+  async function apiBookings(term) {
+    await apiUnit(term);
+    const n = +(await apiCall('GetBookUserBookingCount')).textContent || 0;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const v = list(await apiCall('GetBookUserBookings', { bookindex: xl(i) })); // [5, 'Tirsdag 20 Okt', 'Vask 1', '13:00', '15:00', true]
+      if (!(+v[0] >= 4)) continue;
+      const cells = [v[1], fmtMachine(v[2]), v[3], v[4]];
+      out.push({ key: cells.join(' | '), cells, id: 'api:' + i, idx: i, term });
+    }
+    return out;
+  }
+
+  // Begge uger + dine bookinger for ét vaskeri. Celle-id: "dato|passindex|fra".
+  async function apiLoadTerm(term) {
+    step(`Henter kalender · ${shortName(term)}`);
+    const days = await apiCalDays(term, 0, 13);
+    for (const week of [0, 1]) {
+      const span = Array.from({ length: 7 }, (_, i) => dayTs(week * 7 + i));
+      const cells = [];
+      for (const day of days) {
+        const d = span.indexOf(day.ts);
+        if (d < 0) continue;
+        for (const p of day.passes) {
+          cells.push({ id: `${p.date}|${p.pi}|${p.from}`, d, s: p.pi, g: 0, from: p.from, to: p.to, state: p.free ? 'Ledig' : 'Optaget', bookable: p.free && p.open });
+        }
+      }
+      if (cells.length) S.cal[term + '|' + week] = { days: span, cells, at: Date.now() };
+    }
+    step(`Henter dine tider · ${shortName(term)}`);
+    S.bookMap[term] = await apiBookings(term);
+    render();
+  }
+
+  // Finder dato+passindex for en celle. Celler fra en ældre version (websiden) slås op via dag og tid.
+  async function apiRef(term, week, cellId) {
+    const [date, pi] = String(cellId).split('|');
+    if (pi != null) return { date, pi: +pi };
+    const old = S.cal[term + '|' + week];
+    const c = old && old.cells.find((x) => x.id === cellId);
+    if (!c) throw new VtError('GONE', 'Tiden er ikke længere ledig her.');
+    const ts = old.days[c.d];
+    await apiLoadTerm(term);
+    const now = S.cal[term + '|' + week];
+    const n = now && now.cells.find((x) => now.days[x.d] === ts && x.from === c.from);
+    if (!n) throw new VtError('GONE', 'Tiden er ikke længere ledig her.');
+    return { date: isoDay(ts), pi: n.s };
+  }
+
+  // Maskinvalget for et tidsrum (booker ikke noget). Trinene skal tages i denne rækkefølge.
+  async function apiMachinesAt(term, ref) {
+    await apiUnit(term);
+    step(`Henter maskiner · ${shortName(term)}`);
+    if (code(await apiCall('SetBookPass', { SystemDate: xd(ref.date), passindex: xi(ref.pi) }))) throw new VtError('API', 'Kunne ikke vælge tidsrummet');
+    const types = list(await apiCall('GetBookMachineGroupTypes'));
+    if (!(+types[0] > 0)) throw new VtError('GONE', 'Tiden er ikke længere ledig her.'); // 0 = ingen ledige maskiner
+    await apiCall('SetBookMachineGroupTypes', { typeindex: xi(0) });
+    const names = list(await apiCall('GetNextBookMachineGroups')).slice(1);
+    const free = list(await apiCall('GetBookMachineGroupsFree')).slice(1); // 1 = ledig
+    const left = list(await apiCall('GetBookMachineGroupsCountersLeft'))[1];
+    return {
+      api: true,
+      quota: left != null && +left < 9999 ? +left : null,
+      random: null,
+      options: names.map((n, i) => ({ name: String(i), label: fmtMachine(n), disabled: free[i] !== '1' })),
+    };
+  }
+
+  async function apiMachines(term, week, cellId) {
+    return apiMachinesAt(term, await apiRef(term, week, cellId));
+  }
+
+  async function apiBookMany(term, week, cellId, labels, onProgress) {
+    const ref = await apiRef(term, week, cellId);
+    const done = [];
+    let left = null;
+    for (const label of labels) {
+      onProgress(done.length + 1, labels.length);
+      try {
+        const mg = await apiMachinesAt(term, ref);
+        const opt = mg.options.find((o) => o.label === label && !o.disabled);
+        if (!opt) throw new VtError('BOOK', `${label} er ikke længere ledig.`);
+        step(`Booker ${label}`);
+        const r = list(await apiCall('SetBookMachineGroup', { machinegroupindex: xi(+opt.name) })); // [4, 20261020, 'Vask 1', '13:00', '15:00']
+        if (!/^\d{8}$/.test(r[1] || '')) throw new VtError('BOOK', 'Bookingen gik ikke igennem');
+        const l = list(await apiCall('GetBookMachineGroupsCountersLeft'))[1];
+        left = l != null && +l < 9999 ? +l : null;
+        done.push(label);
+      } catch (e) {
+        if (e.code === 'APISESSION' && !done.length) throw e; // intet booket endnu – apiRun logger ind og prøver igen
+        return { done, left, error: e };
+      }
+    }
+    return { done, left, error: null };
+  }
+
+  // Samme booking set fra web og API: dato + maskinnummer + starttid.
+  const bookingSig = (b) => `${bookingDate(b)}|${machineNo(b.cells[1])}|${b.cells[2]}`;
+  const keySig = (key) => bookingSig({ cells: key.split(' | ') });
+
+  async function apiCancelMany(term, keys) {
+    step(`Afbestiller · ${shortName(term)}`);
+    const want = keys.map(keySig);
+    const before = await apiBookings(term);
+    // Bagfra, så indeksene på de resterende ikke flytter sig.
+    const idx = before.filter((b) => want.includes(bookingSig(b))).map((b) => b.idx).sort((a, b) => b - a);
+    for (const i of idx) await apiCall('DelBookUserBookings', { bookindex: xl(i) });
+    const after = await apiBookings(term);
+    return { after, failed: keys.filter((k) => after.some((b) => bookingSig(b) === keySig(k))) };
+  }
+
+  // Status for alle vaskerier i ét kald – med rigtig køre-status (Started/Done) og klar-tid.
+  async function apiStatus() {
+    step('Henter status');
+    const res = await apiCall('GetMachineGroups', {}, 30000, 'loginGuid');
+    const laundries = [];
+    let L = null;
+    for (const s of res.getElementsByTagNameNS(API_NS, 'SelectionObjectsAndObjectStatus')) {
+      const name = tx(s, 'Name');
+      let m;
+      let type;
+      if ((m = /^Bestil vask\s*(.*)$/i.exec(name))) {
+        L = { name: m[1] || 'Vaskeri', groups: [] };
+        laundries.push(L);
+        type = 'Vaskemaskiner';
+      } else if (L && /^Bestil (tørretumbler|tørring|tørreskab)/i.test(name)) {
+        type = 'Tørretumblere';
+      } else continue;
+      const machines = [...s.getElementsByTagNameNS(API_NS, 'Machine')].map((x) => {
+        const st = tx(x, 'Status');
+        const ready = tx(x, 'ReadyTime');
+        const start = tx(x, 'StartTime');
+        const hm = (t) => /^\d{1,2}:\d{2}$/.test(t);
+        const nm = tx(x, 'MachineName').replace(/^VASK\s*/i, 'Vask ').replace(/^TØRRE?\s*/i, 'Tør ');
+        if (/start|run|busy/i.test(st)) return { name: nm, state: 'I brug', detail: hm(ready) ? `Klar ca. ${ready}` : hm(start) ? `Start ${start}` : '' };
+        if (/done|idle|ready|free|finish/i.test(st)) return { name: nm, state: 'Ledig', detail: hm(ready) ? `Afsluttedes ${ready}` : '' };
+        if (/book|reserv/i.test(st)) return { name: nm, state: 'Reserveret', detail: '' };
+        return { name: nm, state: st || 'Ukendt', detail: '' };
+      });
+      L.groups.push({ type, machines });
+    }
+    if (!laundries.length) {
+      if (code(await apiCall('GetSystemDate')) === 0) throw new VtError('API', 'Status fra API var tom');
+    }
+    return { laundries, at: Date.now() };
+  }
+
+  // Dagens resterende tidsrum for ét vaskeri: hvilke maskiner er booket nu, og hvornår næste gang.
+  // Læser kun maskinvalget – der bookes ikke noget.
+  async function apiPlanDay(term, nums) {
+    const days = await serial(() => apiRun(() => apiCalDays(term, 0, 0)));
+    const passes = days.length ? days[0].passes : [];
+    const next = {};
+    const now = {};
+    let known = nums ? [...nums] : null;
+    for (const p of passes) {
+      if (toMin(p.to) <= nowMin()) continue;
+      const current = toMin(p.from) <= nowMin();
+      let booked;
+      if (!p.free) booked = known || ['*'];
+      else {
+        const mg = await serial(() => apiRun(() => apiMachinesAt(term, { date: p.date, pi: p.pi }))).catch(() => null);
+        if (!mg) continue;
+        if (!known) known = mg.options.map((o) => machineNo(o.label));
+        booked = mg.options.filter((o) => o.disabled).map((o) => machineNo(o.label));
+      }
+      for (const n of booked) {
+        if (current) now[n] = true;
+        else if (!next[n]) next[n] = p.from;
+      }
+      if (known && known.every((n) => next[n])) break;
+    }
+    return { next, now };
   }
 
   // ---------------------------------------------------------------------------
@@ -567,15 +892,18 @@
   }
 
   async function loadTerms() {
-    return serial(() => withSession(async () => {
+    return serial(() => viaApi(async () => {
+      S.terms = [...api.units];
+      return S.terms;
+    }, () => withSession(async () => {
       S.terms = parseTerminals(await selector()).map((t) => t.name);
       return S.terms;
-    }));
+    }), 'vaskerier'));
   }
 
-  // Ét job: vaskeriets forside (bookinger) + kalender for ugen.
+  // Ét job: vaskeriets bookinger + kalender. API'et henter begge uger på én gang.
   function loadCalendar(term, week) {
-    return serial(() => withSession(async () => {
+    return serial(() => viaApi(() => apiLoadTerm(term), () => withSession(async () => {
       let cal;
       if (ctx && ctx.term === term && ctx.page === 'calendar' && ctx.week === week - 1) {
         cal = await gotoCalendar(term, week);
@@ -586,7 +914,7 @@
       }
       S.cal[term + '|' + week] = parseCalendar(cal, week);
       render();
-    }));
+    }), `kalender ${shortName(term)}`));
   }
 
   let refreshing = null;
@@ -596,12 +924,15 @@
     S.error = '';
     render();
     refreshing = (async () => {
+      const t0 = Date.now();
       try {
         await loadTerms();
         for (const term of ordered()) {
           await loadCalendar(term, 0);
-          await loadCalendar(term, 1);
+          const w1 = S.cal[term + '|1'];
+          if (!w1 || w1.at < t0) await loadCalendar(term, 1); // API'et har allerede hentet uge 2
         }
+        timings.push({ label: 'opdatér alt', via: apiReady() ? 'api' : 'web', ms: Date.now() - t0 });
         S.bookingsAt = Date.now();
         saveCache();
         refreshDayPlan(); // så Status har tidspunkterne klar
@@ -671,8 +1002,8 @@
         const L = S.status && S.status.laundries.find((x) => sameLaundry(x.name, term));
         const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
         const nums = G ? G.machines.map((m) => machineNo(m.name)) : null;
-        const next = await planDay(term, nums);
-        S.dayPlan[term] = { day: today, at: Date.now(), next };
+        const plan = apiReady() ? await apiPlanDay(term, nums) : { next: await planDay(term, nums) };
+        S.dayPlan[term] = { day: today, at: Date.now(), ...plan };
         render();
       }
       saveCache();
@@ -689,10 +1020,11 @@
     S.statusError = '';
     let last;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      S.statusBusy = attempt === 1 ? 'Henter status… vasketur.dk er langsom her, det kan tage op til 20 sekunder.' : `Status svarede ikke. Prøver igen (${attempt} af 3)…`;
+      S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen (${attempt} af 3)…`
+        : apiReady() ? 'Henter status…' : 'Henter status… vasketur.dk er langsom her, det kan tage op til 20 sekunder.';
       render();
       try {
-        S.status = await serial(() => withSession(loadStatusOnce), true);
+        S.status = await serial(() => viaApi(apiStatus, () => withSession(loadStatusOnce), 'status'), true);
         S.statusBusy = '';
         saveCache();
         render();
@@ -769,7 +1101,7 @@
     render();
     serial(() => {
       if (S.sheet === sh) { sh.probes[c.term].waiting = false; render(); }
-      return withSession(() => startBooking(c.term, sh.week, c.cellId));
+      return machinesFor(c.term, sh.week, c.cellId);
     }, true).then((mg) => {
       if (S.sheet !== sh) return;
       sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
@@ -783,6 +1115,17 @@
       render();
     });
   }
+
+  // API først, websiderne som reserve.
+  const machinesFor = (term, week, cellId) => viaApi(
+    () => apiMachines(term, week, cellId), () => withSession(() => startBooking(term, week, cellId)), 'maskinvalg');
+  const cancelFor = (term, keys) => viaApi(
+    () => apiCancelMany(term, keys), () => withSession(() => cancelMany(term, keys)), `afbestil ${keys.length}`);
+  // Booking falder ikke tilbage midt i et forløb – fejl vises, og man kan prøve igen (så via websiden).
+  const bookFor = (term, week, cellId, labels, fresh, onProgress) => viaApi(
+    () => apiBookMany(term, week, cellId, labels, onProgress),
+    () => bookMachines(term, week, cellId, labels, fresh && !fresh.api ? fresh : null, onProgress),
+    `book ${labels.length}`, false);
 
   function freeLabels(mg) { return mg.options.filter((o) => !o.disabled).map((o) => o.label); }
 
@@ -841,13 +1184,13 @@
     serial(async () => {
       let cancelled = [];
       if (removeItems.length) {
-        const r = await withSession(() => cancelMany(c.term, removeItems.map((b) => b.key)));
+        const r = await cancelFor(c.term, removeItems.map((b) => b.key));
         S.bookMap[c.term] = r.after.map((x) => ({ ...x, term: c.term }));
         cancelled = removeItems.filter((b) => !r.failed.includes(b.key)).map((b) => b.cells[1]);
         if (r.failed.length) return { done: [], cancelled, left: null, error: new VtError('CANCEL', 'Ikke alle kunne afbestilles') };
       }
       if (!labels.length) return { done: [], cancelled, left: null, error: null };
-      const res = await bookMachines(c.term, sh.week, c.cellId, labels, fresh, (i, n) => {
+      const res = await bookFor(c.term, sh.week, c.cellId, labels, fresh, (i, n) => {
         sh.progress = n > 1 ? `Booker maskine ${i} af ${n}…` : 'Booker…';
         render();
       });
@@ -871,11 +1214,14 @@
       sh.probes[c.term] = { state: 'loading', waiting: false };
       render();
       // Hent bookinger og maskinvalg igen, så vinduet viser det nye ("din").
-      serial(() => withSession(async () => {
+      serial(() => viaApi(async () => {
+        S.bookMap[c.term] = await apiBookings(c.term);
+        return apiMachines(c.term, sh.week, c.cellId);
+      }, () => withSession(async () => {
         const main = await openTerminal(c.term);
         S.bookMap[c.term] = parseBookings(main).map((b) => ({ ...b, term: c.term }));
         return startBooking(c.term, sh.week, c.cellId);
-      }), true).then((mg) => {
+      })), true).then((mg) => {
         if (S.sheet !== sh) return;
         sh.probes[c.term] = { state: 'ok', mg, at: Date.now() };
         sh.lastProbe = c.term;
@@ -957,15 +1303,15 @@
       byTerm.get(g.term).push(...g.items.map((b) => b.key));
     }
     const total = [...byTerm.values()].reduce((n, k) => n + k.length, 0);
-    serial(() => withSession(async () => {
+    serial(async () => {
       let failed = 0;
       for (const [term, keys] of byTerm) {
-        const res = await cancelMany(term, keys);
+        const res = await cancelFor(term, keys);
         S.bookMap[term] = res.after.map((x) => ({ ...x, term }));
         failed += res.failed.length;
       }
       return failed;
-    }), true).then((failed) => {
+    }, true).then((failed) => {
       saveCache();
       if (failed) {
         S.sheet = { ...sh, phase: 'error', msg: `${failed} af ${total} kunne ikke afbestilles. Prøv igen.` };
@@ -988,7 +1334,7 @@
     if (!sh || sh.kind !== 'cancel' || !sh.sel.length) return;
     sh.phase = 'cancelling';
     render();
-    serial(() => withSession(() => cancelMany(sh.g.term, sh.sel)), true)
+    serial(() => cancelFor(sh.g.term, sh.sel), true)
       .then(({ after, failed }) => {
         S.bookMap[sh.g.term] = after.map((x) => ({ ...x, term: sh.g.term }));
         saveCache();
@@ -1051,11 +1397,16 @@
     S.loggingIn = true;
     S.error = '';
     render();
-    serial(() => login(user, pass), true).then(() => {
+    memCreds = { user, pass };
+    api.broken = '';
+    // API'et først (hurtigt). Fejler det, afgør websiden om koden er forkert.
+    serial(async () => {
+      try { await apiConnect(); } catch (e) { api.broken = e.message || 'API-login fejlede'; await login(user, pass); }
+    }, true).then(() => {
       if (remember) store.set('creds', { user, pass }); else store.del('creds');
       S.loggingIn = false;
       startApp();
-    }, (e) => { S.loggingIn = false; S.view = 'login'; S.error = e.message; render(); });
+    }, (e) => { memCreds = null; S.loggingIn = false; S.view = 'login'; S.error = e.message; render(); });
   }
 
   function doForget() {
@@ -1346,6 +1697,10 @@
       const nx = nextPass()[0];
       return { cls: 'ok', label: 'Ledig', sub: toMin(nx) > nowMin() ? `til kl. ${shortTime(nx)}` : `til i morgen kl. ${shortTime(nx)}` };
     }
+    // API'ets status kender ikke bookinger – dagsplanen ved, om maskinen er booket i den igangværende tid.
+    if (cls === 'ok' && bookable && plan && plan.now && (plan.now[machineNo(m.name)] || plan.now['*'])) {
+      return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(passNow()[1])}` };
+    }
     if (cls === 'ok') {
       if (!bookable || !plan) return { cls, label: 'Ledig', sub: '' };
       const at = plan.next[machineNo(m.name)] || plan.next['*'];
@@ -1385,7 +1740,7 @@
   }
 
   function renderLogin() {
-    const c = creds();
+    const c = savedCreds();
     return `<section class="block card login">
       <h2>Log ind</h2>
       <p class="muted small">Brug samme navn og adgangskode som på vasketur.dk.</p>
@@ -1495,7 +1850,7 @@
     h += `<div class="countrow"><span>Antal maskiner jeg plejer at booke</span><span class="stepper"><button data-act="count" data-d="-1">−</button><b>${S.count}</b><button data-act="count" data-d="1">+</button></span></div>`;
     h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
     h += `<div class="sh-foot"><a class="btn-link small" href="${HELP_URL}" target="_blank" rel="noopener">Hjælp og vejledning</a><button class="btn-link small" data-act="original">Åbn den gamle side</button>`;
-    if (creds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
+    if (savedCreds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
     h += '</div>';
     return h;
   }
@@ -1916,8 +2271,13 @@
     if (!meta) { meta = document.createElement('meta'); meta.name = 'theme-color'; document.head.appendChild(meta); }
     meta.content = matchMedia('(prefers-color-scheme: dark)').matches ? '#0d0f13' : '#f3f4f6';
 
-    if (isLoginPage(document)) {
-      const c = creds();
+    const c = savedCreds();
+    // Med gemt login går alt via API'et – websiden behøver ikke engang at være logget ind.
+    if (c) {
+      render();
+      try { await serial(apiConnect, true); } catch (e) { api.broken = e.message || 'API-login fejlede'; }
+    }
+    if (isLoginPage(document) && !api.guid) {
       if (!c) { S.view = 'login'; render(); return; }
       render();
       try {
@@ -1933,7 +2293,11 @@
   }
 
   // Til test udefra (ingen effekt i normal brug).
-  window.__vasketid = { S, render: () => render(), refresh, slotsFor, bookingGroups, ordered, parseStatus, machineView };
+  window.__vasketid = {
+    S, render: () => render(), refresh, slotsFor, bookingGroups, ordered, parseStatus, machineView, timings,
+    apiState: () => ({ ready: apiReady(), loggedIn: !!api.guid, broken: api.broken, off: api.off }),
+    useWeb: (on) => { api.off = !!on; }, // test: tving websiderne for at måle før/efter
+  };
 
   init();
 })();
