@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.0
+// @version      0.9.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.0'; // skal matche @version øverst
+  const VERSION = '0.9.1'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -862,8 +862,9 @@
 
   // Dagens resterende tidsrum for ét vaskeri: hvilke maskiner er booket nu, og hvornår næste gang.
   // Læser kun maskinvalget – der bookes ikke noget.
-  // full = false: kun det igangværende tidsrum (er en ledig maskine booket lige nu?). full = true: også "ledig til".
-  async function apiPlanDay(term, need, full = true) {
+  // Næste booking pr. ledig maskine. Det igangværende tidsrum springes over: en booking, der ikke er startet,
+  // frigives efter få minutter, så maskinens faktiske tilstand (fra status) er det rigtige svar for "nu".
+  async function apiPlanDay(term, need) {
     const next = {};
     const now = {};
     if (need && !need.length) return { next, now, need }; // ingen ledige maskiner – intet at slå op
@@ -877,7 +878,7 @@
       if (known && known.every((n) => now[n] || next[n])) break; // alle ledige maskiner har fået svar
       if (toMin(p.to) <= nowMin()) continue;
       const current = toMin(p.from) <= nowMin();
-      if (!full && !current) break;
+      if (current) continue;
       let booked;
       if (!p.free) booked = known || ['*']; // helt optaget ifølge kalenderen – ingen ekstra kald
       else {
@@ -898,7 +899,7 @@
         else if (!next[n]) next[n] = p.from;
       }
     }
-    return { next, now, need: full ? known : [] };
+    return { next, now, need: known };
   }
 
 
@@ -1102,7 +1103,7 @@
     const G = L && L.groups.find((g) => !/tørre/i.test(g.type));
     return G ? G.machines.filter((m) => machineView(m, true, null).cls === 'ok').map((m) => machineNo(m.name)) : null;
   }
-  // Automatisk: om en ledig maskine er booket lige nu (få kald). "Ledig til" hentes først, når man trykker på en maskine.
+  // "Ledig til" hentes kun for de vaskerier, man har trykket på.
   async function refreshDayPlan() {
     if (S.planBusy) return;
     const today = dayTs(0);
@@ -1116,9 +1117,9 @@
           const need = needOf(t);
           if (!fresh(p) || !p.full || (need && (!p.need || need.some((n) => !p.need.includes(n))))) out.push([t, true]);
           else S.planWant.delete(t);
-        } else if (apiReady() && !fresh(p)) out.push([t, false]);
+        }
       }
-      return out.sort((x, y) => y[1] - x[1]); // tryk først
+      return out;
     };
     try {
       for (let j = jobs(); j.length; j = jobs()) {
@@ -1128,7 +1129,7 @@
         const need = needOf(term);
         let plan;
         try {
-          plan = apiReady() ? await apiPlanDay(term, need, full) : { next: await planDay(term, need), now: {}, need };
+          plan = apiReady() ? await apiPlanDay(term, need) : { next: await planDay(term, need), now: {}, need };
         } catch (e) {
           plan = { next: {}, now: {}, need: [], failed: true }; // ikke kritisk – status vises bare uden tidspunkter
         }
@@ -1844,10 +1845,6 @@
       if (cur) return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(cur[1])}` };
       const nx = nextPass()[0];
       return { cls: 'ok', label: 'Ledig', sub: toMin(nx) > nowMin() ? `til kl. ${shortTime(nx)}` : `til i morgen kl. ${shortTime(nx)}` };
-    }
-    // API'ets status kender ikke bookinger – dagsplanen ved, om maskinen er booket i den igangværende tid.
-    if (cls === 'ok' && bookable && plan && plan.now && (plan.now[machineNo(m.name)] || plan.now['*'])) {
-      return { cls: 'res', label: 'Booket nu', sub: `til kl. ${shortTime(passNow()[1])}` };
     }
     if (cls === 'ok') {
       if (!bookable || !plan) return { cls, label: 'Ledig', sub: '' };
