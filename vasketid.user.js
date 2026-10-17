@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.5
+// @version      0.8.6
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.5'; // skal matche @version øverst
+  const VERSION = '0.8.6'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -132,9 +132,10 @@
       cur = null;
       sessTerm = null;
       const raw = pageMessage(doc);
-      throw new VtError('SERVER', /ingen kontakt med systemet/i.test(raw)
-        ? 'vasketur.dk har ikke forbindelse til vaskerierne lige nu. Prøv igen om lidt.'
-        : 'vasketur.dk havde en fejl. Prøv igen om lidt.');
+      if (/ingen kontakt med systemet/i.test(raw)) {
+        throw new VtError('OFFLINE', 'vasketur.dk har ikke forbindelse til vaskerierne lige nu. Prøv igen om lidt.');
+      }
+      throw new VtError('SERVER', 'vasketur.dk havde en fejl. Prøv igen om lidt.');
     }
     if (!allowLogin && isLoginPage(doc)) {
       cur = null;
@@ -215,7 +216,7 @@
 
   async function login(user, pass) {
     if (isBlocked()) throw blockedError();
-    beforeLogin();
+    await beforeLogin();
     selCache = null;
     sessTerm = null;
     const p = await request(BASE + 'Default.aspx', {}, true);
@@ -538,8 +539,18 @@
   const LOGIN_WINDOW = 10 * 60000;
   let manualLogin = false;
   const hhmmOf = (t) => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
-  function beforeLogin() {
-    const log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
+  // Automatiske logins venter mindst 60 s efter det forrige, så en fejl ikke giver en byge af logins.
+  const LOGIN_GAP = 60000;
+  async function beforeLogin() {
+    let log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
+    if (!manualLogin && log.length) {
+      const until = log[log.length - 1] + LOGIN_GAP;
+      while (Date.now() < until) {
+        step(`Venter ${Math.ceil((until - Date.now()) / 1000)} s før nyt login`);
+        await sleep(1000);
+      }
+      log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
+    }
     if (!manualLogin && log.length >= LOGIN_CAP) {
       throw new VtError('THROTTLE', `Appen har allerede logget ind ${LOGIN_CAP} gange de sidste 10 minutter og venter til kl. ${hhmmOf(log[0] + LOGIN_WINDOW)}, så kontoen ikke bliver spærret. Du kan selv trykke Log ind.`);
     }
@@ -599,7 +610,7 @@
     const c = creds();
     if (!c) throw new VtError('LOGIN', 'Du er ikke logget ind');
     if (isBlocked()) throw blockedError();
-    beforeLogin();
+    await beforeLogin();
     step('Logger ind');
     api.guid = null;
     clearApiKey();
