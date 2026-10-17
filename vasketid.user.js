@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.7.3
+// @version      0.7.4
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -844,6 +844,9 @@
     const keys = g.items.map(selKey);
     const allOn = keys.every((k) => S.mineSel.includes(k));
     S.mineSel = allOn ? S.mineSel.filter((k) => !keys.includes(k)) : [...new Set([...S.mineSel, ...keys])];
+    if (g.items.length > 1) {
+      S.mineOpen = allOn ? S.mineOpen.filter((x) => x !== gk) : [...new Set([...S.mineOpen, gk])];
+    }
     render();
   }
 
@@ -1088,13 +1091,13 @@
       const sub = open
         ? `<div class="mb-items">${g.items.map((b) => {
           const on = S.mineSel.includes(selKey(b));
-          return `<div class="mb-item ${on ? 'sel' : ''}"><button class="mb-check small" data-act="mine-item" data-key="${esc(selKey(b))}" aria-label="Markér ${esc(b.cells[1])}">${on ? '✓' : ''}</button><span>${esc(b.cells[1])}</span></div>`;
+          return `<div class="mb-item ${on ? 'sel' : ''}" data-act="mine-item" data-key="${esc(selKey(b))}"><span class="mb-check small" aria-hidden="true">${on ? '✓' : ''}</span><span>${esc(b.cells[1])}</span></div>`;
         }).join('')}</div>`
         : '';
       return `<div class="mybook ${state ? 'sel' : ''}">
         <div class="mb-row">
           <button class="mb-check ${state}" data-act="mine-group" data-k="${esc(gk)}" aria-label="Markér alle">${state === 'all' ? '✓' : state === 'some' ? '–' : ''}</button>
-          <div class="mb-main" ${multi ? `data-act="mine-open" data-k="${esc(gk)}"` : ''}>
+          <div class="mb-main" data-act="mine-group" data-k="${esc(gk)}">
             <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
             <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((x) => x.cells[1])))}</div>
           </div>
@@ -1643,7 +1646,8 @@
   #vt-root .mb-fold{width:36px;height:36px;border:0;background:none;color:var(--muted);font-size:22px;flex:none;transition:transform .15s}
   #vt-root .mb-fold.open{transform:rotate(90deg)}
   #vt-root .mb-items{margin:8px 0 0 40px;display:flex;flex-direction:column;gap:6px}
-  #vt-root .mb-item{display:flex;align-items:center;gap:10px;font-size:15px}
+  #vt-root .mb-item{display:flex;align-items:center;gap:10px;font-size:15px;padding:4px 0;cursor:pointer}
+  #vt-root .mb-check.small{display:grid;place-items:center}
   #vt-root .btn-danger.wide-danger{margin:0 0 10px;padding:12px;font-size:15px}
   #vt-root .mb-main{flex:1;min-width:0} #vt-root .mb-when{font-weight:700} #vt-root .mb-sub{color:var(--muted);font-size:14px}
   #vt-root .book-block{margin-top:0}
