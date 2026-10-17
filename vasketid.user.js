@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.11
+// @version      0.9.12
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.11'; // skal matche @version øverst
+  const VERSION = '0.9.12'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -114,7 +114,11 @@
   // Sat, mens et Status-kald kører: går man væk fra Status, afbrydes API-kaldet, så Book ikke venter på det.
   // Kun API-kald (soap) – aldrig websider, hvor et afbrudt sideskift kan ødelægge sessionen.
   let statusCtrl = null;
-  const linkStatus = (ctrl) => { if (statusCtrl) statusCtrl.signal.addEventListener('abort', () => ctrl.abort()); };
+  const linkStatus = (ctrl) => { if (statusCtrl) statusCtrl.signal.addEventListener('abort', () => { ctrl.left = true; ctrl.abort(); }); };
+  // Er vasketur.dk langsom, viser appen en besked i 3 min, så man ikke trykker igen og igen.
+  let slowUntil = 0;
+  const markSlow = () => { slowUntil = Date.now() + 3 * 60000; };
+  const isSlow = () => Date.now() < slowUntil;
   const statusJob = (fn) => async () => {
     statusCtrl = new AbortController();
     try { return await fn(); } finally { statusCtrl = null; }
@@ -586,18 +590,21 @@
     const ctrl = new AbortController();
     linkStatus(ctrl);
     const timer = setTimeout(() => ctrl.abort(), timeout);
+    const t0 = Date.now();
     let r;
     try {
       r = await fetch(API_URL, {
         method: 'POST', credentials: 'same-origin', body: env, signal: ctrl.signal,
         headers: { 'Content-Type': 'text/xml; charset=utf-8', SOAPAction: `"${API_NS}/${op}"` },
       });
+      if (Date.now() - t0 > 4000) markSlow();
     } catch (e) {
+      if (!ctrl.left) markSlow();
       throw new VtError('NET', e.name === 'AbortError' ? 'vasketur.dk svarer ikke lige nu. Prøv igen.' : 'Ingen forbindelse til vasketur.dk. Tjek dit net.');
     } finally {
       clearTimeout(timer);
     }
-    if (!r.ok) throw new VtError('NET', 'vasketur.dk svarer ikke lige nu. Prøv igen om lidt.'); // midlertidigt – skift ikke til websiden
+    if (!r.ok) { markSlow(); throw new VtError('NET', 'vasketur.dk svarer ikke lige nu. Prøv igen om lidt.'); } // midlertidigt – skift ikke til websiden
     const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
     const res = doc.getElementsByTagNameNS(API_NS, op + 'Result')[0];
     if (!res) throw new VtError('API', `Uventet svar fra API (${op})`);
@@ -1269,10 +1276,13 @@
       render();
       return;
     }
+    if (p && p.state === 'loading') { render(); return; } // allerede i kø
     sh.probes[c.term] = { state: 'loading', waiting: running };
     render();
     serial(() => {
-      if (S.sheet === sh) { sh.probes[c.term].waiting = false; render(); }
+      if (S.sheet !== sh || sh.idx !== idx) return Promise.reject(new VtError('LEFT', '')); // vinduet er lukket eller skiftet – spring over
+      sh.probes[c.term].waiting = false;
+      render();
       return machinesFor(c.term, sh.week, c.cellId);
     }, true).then((mg) => {
       if (S.sheet !== sh) return;
@@ -1282,6 +1292,7 @@
       if (sh.idx === idx) preselect();
       render();
     }, (e) => {
+      if (e.code === 'LEFT') { if (sh.probes[c.term] && sh.probes[c.term].state === 'loading') delete sh.probes[c.term]; return; }
       if (S.sheet !== sh) return;
       if (e.code === 'LOGIN' && !creds()) { S.sheet = null; handleError(e); return; }
       sh.probes[c.term] = { state: 'error', msg: e.message };
@@ -1970,7 +1981,7 @@
       const c = sh.cands[sh.idx];
       const p = sh.probes[c.term] || {};
       if (p.state === 'loading') {
-        h += `<div class="sh-wait"><span class="spinner"></span>${activity ? `${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s` : `Ser hvilke maskiner der er ledige på ${esc(shortName(c.term))}…`}</div>`;
+        h += `<div class="sh-wait"><span class="spinner"></span>${activity ? `${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s${Date.now() - activity.since > 3000 ? ' · vent venligst' : ''}` : `Ser hvilke maskiner der er ledige på ${esc(shortName(c.term))}…`}</div>`;
       } else if (p.state === 'error') {
         h += `<div class="alert">${esc(p.msg)}</div>`;
         if (sh.idx + 1 < sh.cands.length) h += `<button class="btn-ghost wide" data-act="probe" data-i="${sh.idx + 1}">Prøv ${esc(shortName(sh.cands[sh.idx + 1].term))}</button>`;
@@ -2161,6 +2172,7 @@
     else {
       if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><button class="btn-primary small-btn" data-act="do-update">Opdatér</button><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button><small class="upd-help">Virker knappen ikke? ${esc(updateHelp())}</small></div>`;
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
+      if (isSlow()) main += '<div class="slow-note">Forbindelsen til vasketur.dk er langsom lige nu. Tryk én gang, og giv den et øjeblik.</div>';
       main += S.tab === 'book' ? renderBook() : S.tab === 'mine' ? renderMine() : renderStatus();
     }
     const sheet = renderSheet(!!S.sheet && !sheetWasOpen);
@@ -2179,7 +2191,7 @@
       sheet,
       toast: S.toast ? `<div class="toast">${esc(S.toast)}</div>`
         : activity && Date.now() - activity.since > 700 && !(S.sheet && S.sheet.kind === 'book')
-          ? `<div class="activity"><span class="spinner"></span>${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s</div>` : '',
+          ? `<div class="activity ${Date.now() - activity.since > 3000 ? 'slow' : ''}"><span class="spinner"></span>${esc(activity.label)} … ${Math.floor((Date.now() - activity.since) / 1000)} s${Date.now() - activity.since > 3000 ? ' · vent venligst' : ''}</div>` : '',
     };
     if (!root.firstChild) {
       root.innerHTML = '<header data-part="header"></header><div class="scroll"><main data-part="main"></main></div><div class="part" data-part="nav"></div><div class="part" data-part="sheet"></div><div class="part" data-part="toast"></div>';
@@ -2454,6 +2466,8 @@
   #vt-root .update .upd-help{flex-basis:100%;font-weight:400;font-size:12px;opacity:.8}
   #vt-root .btn-primary.small-btn{display:inline-block;width:auto;margin:0;padding:8px 14px;font-size:14px;text-decoration:none}
   #vt-root .btn-x{border:0;background:none;color:var(--muted);width:32px;height:32px;font-size:15px}
+  #vt-root .activity.slow{color:var(--fg);border-color:var(--accent);font-weight:600}
+  #vt-root .slow-note{background:var(--resbg);color:var(--res);border-radius:12px;padding:10px 12px;margin:0 0 10px;font-size:14px;font-weight:600}
   #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
   `;
 
