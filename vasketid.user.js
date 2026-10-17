@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.6
+// @version      0.9.7
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.6'; // skal matche @version øverst
+  const VERSION = '0.9.7'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1169,33 +1169,31 @@
     if (S.statusBusy) return;
     if (!passNow()) { S.statusError = ''; render(); return; } // uden for åbningstid: ingen kald (styringerne svarer ikke)
     S.statusError = '';
-    let last;
-    for (let attempt = 1; attempt <= 2; attempt++) { // højst ét nyt forsøg
-      statusAttempt = attempt;
-      S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen…`
-        : apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
+    statusAttempt = 1;
+    S.statusBusy = apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
+    render();
+    // Ét forsøg – fejler det, vises en besked, og man trykker selv igen.
+    try {
+      S.status = await serial(statusJob(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status', false, true) : Promise.reject(leftStatus()))), true);
+      S.statusBusy = '';
+      saveCache();
       render();
-      try {
-        S.status = await serial(statusJob(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status', false, true) : Promise.reject(leftStatus()))), true);
-        S.statusBusy = '';
-        saveCache();
+      refreshDayPlan();
+    } catch (e) {
+      S.statusBusy = '';
+      if (e.code === 'LEFT' || !onStatus()) { render(); return; } // gået væk – ingen fejl
+      if (e.code === 'LOGIN' && !creds()) {
+        S.statusError = 'Status kunne ikke hentes, fordi vasketur.dk har logget dig ud. Log ind igen – eller slå "Husk mig" til ved login, så klarer appen det selv.';
         render();
-        refreshDayPlan();
-        return;
-      } catch (e) {
-        last = e;
-        if (e.code === 'LEFT' || !onStatus()) { S.statusBusy = ''; render(); return; } // gået væk – ingen fejl, ingen nye forsøg
-        if (e.code === 'LOGIN' || e.code === 'BADLOGIN') break;
-        await sleep(1500);
-        if (!onStatus()) { S.statusBusy = ''; render(); return; }
+      } else if (['BLOCKED', 'THROTTLE', 'BADLOGIN', 'LOGIN'].includes(e.code)) {
+        handleError(e, 'statusError');
+      } else {
+        S.statusError = 'Status kunne ikke hentes lige nu – vasketur.dk svarer ikke. Prøv igen om lidt.';
+        render();
       }
     }
-    S.statusBusy = '';
-    if (last.code === 'LOGIN' && !creds()) {
-      S.statusError = 'Status svarede ikke, og vasketur.dk loggede dig ud. Log ind igen – eller slå "Husk mig" til ved login, så klarer appen det selv.';
-      render();
-    } else handleError(last, 'statusError');
   }
+
 
   // ---------------------------------------------------------------------------
   // Tidsrum for en dag
@@ -1884,7 +1882,7 @@
     let html = '';
     // Status hentes kun, når man trykker – ikke hver gang man kommer forbi siden.
     html += `<button class="btn-primary status-btn" data-act="status-retry" ${S.statusBusy ? 'disabled' : ''}>${S.statusBusy ? 'Henter status…' : S.status ? 'Opdatér status' : 'Hent status'}</button>`;
-    if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
+    if (S.statusError) html += `<div class="alert">${esc(S.statusError)}</div>`; // knappen ovenover prøver igen
     if (S.status) {
       const order = ordered();
       const rank = (n) => { const i = order.findIndex((t) => sameLaundry(t, n)); return i < 0 ? 50 + hillRank(n) : i; };
