@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.0
+// @version      0.8.1
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.0'; // skal matche @version øverst
+  const VERSION = '0.8.1'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1946,7 +1946,7 @@
     else if (S.view === 'login') main = renderLogin();
     else if (S.view === 'setup') main = renderSetup();
     else {
-      if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><a class="btn-primary small-btn" href="${SCRIPT_URL}">Opdatér</a><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button></div>`;
+      if (S.update && !S.updateHidden) main += `<div class="update"><span>Ny version ${esc(S.update)} er klar</span><button class="btn-primary small-btn" data-act="do-update">Opdatér</button><button class="btn-x" data-act="hide-update" aria-label="Skjul">✕</button><small class="upd-help">Virker knappen ikke? Åbn Violentmonkey (Firefox-menuen → Udvidelser) og tryk opdatér ved Vasketid.</small></div>`;
       if (S.error) main += `<div class="alert">${esc(S.error)}<button class="btn-ghost" data-act="refresh">Prøv igen</button></div>`;
       main += S.tab === 'book' ? renderBook() : S.tab === 'mine' ? renderMine() : renderStatus();
     }
@@ -2048,6 +2048,12 @@
       case 'do-cancel': doCancel(); break;
       case 'cancel-all': askCancelAll(); break;
       case 'hide-update': S.updateHidden = true; render(); break;
+      case 'do-update': {
+        // Åbn i ny fane direkte fra trykket – så må Firefox/Violentmonkey vise "Installér"-siden.
+        const w = window.open(SCRIPT_URL, '_blank');
+        if (!w) location.href = SCRIPT_URL;
+        break;
+      }
       case 'mine-group': toggleMineGroup(el.dataset.k); break;
       case 'mine-item': toggleMineItem(el.dataset.key); break;
       case 'mine-open': toggleMineOpen(el.dataset.k); break;
@@ -2226,7 +2232,9 @@
   #vt-root nav .badge{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:var(--accent-fg);font-size:11px;font-weight:700;display:grid;place-items:center}
   #vt-root .activity{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:var(--card);color:var(--muted);border:1px solid var(--line);padding:7px 12px;border-radius:18px;z-index:19;font-size:13px;white-space:nowrap;box-shadow:var(--shadow);max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis}
   #vt-root .update{display:flex;align-items:center;gap:8px;background:var(--soft);color:var(--accent);border-radius:12px;padding:8px 8px 8px 12px;margin:0 0 10px;font-weight:600;font-size:14px}
+  #vt-root .update{flex-wrap:wrap}
   #vt-root .update span{flex:1}
+  #vt-root .update .upd-help{flex-basis:100%;font-weight:400;font-size:12px;opacity:.8}
   #vt-root .btn-primary.small-btn{display:inline-block;width:auto;margin:0;padding:8px 14px;font-size:14px;text-decoration:none}
   #vt-root .btn-x{border:0;background:none;color:var(--muted);width:32px;height:32px;font-size:15px}
   #vt-root .toast{position:fixed;left:50%;bottom:76px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:22px;z-index:20;font-size:14px;font-weight:600;white-space:nowrap}
