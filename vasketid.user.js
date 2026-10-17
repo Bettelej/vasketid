@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.15
+// @version      0.9.16
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -25,7 +25,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.15'; // skal matche @version øverst
+  const VERSION = '0.9.16'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -1868,7 +1868,7 @@
             <div class="mb-when">${esc(fullDay(g.day))} · ${esc(span(g.from, g.to))}</div>
             <div class="mb-sub">${esc(shortName(g.term))} · ${esc(machineList(g.items.map((x) => x.cells[1])))}</div>
           </div>
-          ${multi ? `<button class="mb-fold ${open ? 'open' : ''}" data-act="mine-open" data-k="${esc(gk)}" aria-label="Vis maskiner">›</button>` : ''}
+          ${multi ? `<button class="mb-fold ${open ? 'open' : ''}" data-act="mine-open" data-k="${esc(gk)}" aria-expanded="${open}" aria-label="${open ? 'Skjul' : 'Vis'} de ${g.items.length} maskiner"><span class="mb-fold-n">${g.items.length}</span><span class="mb-fold-ch">›</span></button>` : ''}
         </div>${sub}
       </div>`;
     }).join('');
@@ -2452,8 +2452,13 @@
   #vt-root .mb-check.all,#vt-root .mb-check.some,#vt-root .mb-item.sel .mb-check{background:var(--err);border-color:var(--err);color:#fff}
   #vt-root .mb-check.small{width:24px;height:24px;font-size:13px}
   #vt-root .mb-main[data-act]{cursor:pointer}
-  #vt-root .mb-fold{width:36px;height:36px;border:0;background:none;color:var(--muted);font-size:22px;flex:none;transition:transform .15s}
-  #vt-root .mb-fold.open{transform:rotate(90deg)}
+  /* Fold-ud er sin egen zone yderst til højre (hele rækkens højde), adskilt fra markeringen med en streg. */
+  #vt-root .mb-fold{align-self:stretch;margin:-12px -12px -12px 0;width:56px;border:0;border-left:1px solid var(--line);background:var(--soft);color:var(--accent);border-radius:0 13px 13px 0;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;padding:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  #vt-root .mb-fold:active{filter:brightness(.95)}
+  #vt-root .mb-fold.open{border-bottom-right-radius:0}
+  #vt-root .mb-fold-n{font-size:12px;font-weight:700;line-height:1}
+  #vt-root .mb-fold-ch{font-size:22px;line-height:1;transition:transform .15s;transform:rotate(90deg)}
+  #vt-root .mb-fold.open .mb-fold-ch{transform:rotate(-90deg)}
   #vt-root .mb-items{margin:8px 0 0 40px;display:flex;flex-direction:column;gap:6px}
   #vt-root .mb-item{display:flex;align-items:center;gap:10px;font-size:15px;padding:4px 0;cursor:pointer}
   #vt-root .mb-check.small{display:grid;place-items:center}
