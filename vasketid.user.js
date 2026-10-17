@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.3
+// @version      0.9.4
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.3'; // skal matche @version øverst
+  const VERSION = '0.9.4'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -875,6 +875,7 @@
     const passes = days.length ? days[0].passes : [];
     let known = need ? [...need] : null;
     for (const p of passes) {
+      if (!onStatus()) throw leftStatus();
       if (known && known.every((n) => now[n] || next[n])) break; // alle ledige maskiner har fået svar
       if (toMin(p.to) <= nowMin()) continue;
       const current = toMin(p.from) <= nowMin();
@@ -1111,6 +1112,7 @@
     const fresh = (p) => p && p.day === today && p.pass === pass && Date.now() - p.at < 5 * 60000;
     const jobs = () => {
       const out = [];
+      if (!onStatus()) { S.planWant.clear(); return out; }
       for (const t of [...new Set([...S.planWant, ...ordered()])]) {
         const p = S.dayPlan[t];
         if (S.planWant.has(t)) {
@@ -1131,6 +1133,7 @@
         try {
           plan = apiReady() ? await apiPlanDay(term, need) : { next: await planDay(term, need), now: {}, need };
         } catch (e) {
+          if (e.code === 'LEFT') continue; // gået væk fra Status – gem intet
           plan = { next: {}, now: {}, need: [], failed: true }; // ikke kritisk – status vises bare uden tidspunkter
         }
         S.dayPlan[term] = { day: today, pass, at: Date.now(), full: full && !plan.failed, ...plan };
@@ -1145,6 +1148,9 @@
   }
 
 
+  // Status hentes kun, mens man står på Status – går man væk, stopper det efter det kald, der er i gang.
+  const onStatus = () => S.tab === 'status';
+  const leftStatus = () => new VtError('LEFT', '');
   async function refreshStatus() {
     if (S.statusBusy) return;
     if (!passNow()) { S.statusError = ''; render(); return; } // uden for åbningstid: ingen kald (styringerne svarer ikke)
@@ -1156,7 +1162,7 @@
         : apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
       render();
       try {
-        S.status = await serial(() => viaApi(apiStatus, () => withSession(loadStatusOnce), 'status'), true);
+        S.status = await serial(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status') : Promise.reject(leftStatus())), true);
         S.statusBusy = '';
         saveCache();
         render();
@@ -1164,8 +1170,10 @@
         return;
       } catch (e) {
         last = e;
+        if (e.code === 'LEFT' || !onStatus()) { S.statusBusy = ''; render(); return; } // gået væk – ingen fejl, ingen nye forsøg
         if (e.code === 'LOGIN' || e.code === 'BADLOGIN') break;
         await sleep(1500);
+        if (!onStatus()) { S.statusBusy = ''; render(); return; }
       }
     }
     S.statusBusy = '';
