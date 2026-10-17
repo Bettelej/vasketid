@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.8.3
+// @version      0.8.4
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.8.3'; // skal matche @version øverst
+  const VERSION = '0.8.4'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -202,7 +202,19 @@
   const savedCreds = () => store.get('creds', null);
   const creds = () => savedCreds() || memCreds;
 
+  // Spærring: vasketur.dk svarer "Kunde må ikke logge ind" efter for mange logins. Så logger appen
+  // ikke selv ind i 30 minutter, så den ikke forlænger spærringen.
+  const BLOCK_MS = 30 * 60000;
+  const blockedUntil = () => store.get('blockedUntil', 0);
+  const isBlocked = () => blockedUntil() > Date.now();
+  function blockedError() {
+    const t = new Date(blockedUntil());
+    const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    return new VtError('BLOCKED', `vasketur.dk har spærret login for kontoen lige nu ("Kunde må ikke logge ind"). Det sker typisk efter mange logins på kort tid. Appen prøver ikke selv igen før kl. ${hm}. Virker det stadig ikke, kan viceværten eller vasketur.dk låse kontoen op.`);
+  }
+
   async function login(user, pass) {
+    if (isBlocked()) throw blockedError();
     selCache = null;
     sessTerm = null;
     const p = await request(BASE + 'Default.aspx', {}, true);
@@ -212,7 +224,14 @@
       'ctl00$ContentPlaceHolder1$tbUsername': user,
       'ctl00$ContentPlaceHolder1$tbPassword': pass,
     }, true);
-    if (isLoginPage(res.doc)) throw new VtError('BADLOGIN', 'Forkert navn eller adgangskode');
+    if (isLoginPage(res.doc)) {
+      if (/må ikke logge ind|not allowed to log ?in/i.test(res.doc.body ? res.doc.body.textContent : '')) {
+        store.set('blockedUntil', Date.now() + BLOCK_MS);
+        throw blockedError();
+      }
+      throw new VtError('BADLOGIN', 'Forkert navn eller adgangskode');
+    }
+    store.del('blockedUntil');
     return res;
   }
 
@@ -223,6 +242,7 @@
     } catch (e) {
       const c = creds();
       if ((e.code === 'LOGIN' || e.code === 'SERVER') && c) {
+        if (isBlocked()) throw blockedError();
         step('Logger ind igen');
         await login(c.user, c.pass);
         return fn();
@@ -543,6 +563,7 @@
   async function apiConnect() {
     const c = creds();
     if (!c) throw new VtError('LOGIN', 'Du er ikke logget ind');
+    if (isBlocked()) throw blockedError();
     step('Logger ind');
     api.guid = null;
     api.unit = -1;
@@ -886,6 +907,9 @@
     } else if (e.code === 'BADLOGIN') {
       S.view = 'login';
       store.del('creds');
+      S.error = e.message;
+    } else if (e.code === 'BLOCKED') {
+      S.view = 'login';
       S.error = e.message;
     } else {
       S[field] = e.message || String(e);
@@ -2290,8 +2314,9 @@
     meta.content = matchMedia('(prefers-color-scheme: dark)').matches ? '#0d0f13' : '#f3f4f6';
 
     const c = savedCreds();
+    if (c && isBlocked() && isLoginPage(document)) { S.view = 'login'; S.error = blockedError().message; render(); return; }
     // Med gemt login går alt via API'et – websiden behøver ikke engang at være logget ind.
-    if (c) {
+    if (c && !isBlocked()) {
       render();
       try { await serial(apiConnect, true); } catch (e) { api.broken = e.message || 'API-login fejlede'; }
     }
