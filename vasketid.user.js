@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vasketid
 // @namespace    vasketid.nikolaj
-// @version      0.9.5
+// @version      0.9.6
 // @description  Mobilvenligt UI til vasketur.dk (Electrolux web booking): find tid i dine foretrukne vaskerier, book flere maskiner på én gang, se maskinstatus.
 // @match        https://web.vasketur.dk/DB0073/*
 // @grant        none
@@ -23,7 +23,7 @@
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, maj: 4, jun: 5, jul: 6, aug: 7, sep: 8, okt: 9, nov: 10, dec: 11 };
   const NEXT_BTN = 'ctl00$ContentPlaceHolder1$btCalendarNext';
   const HELP_URL = 'https://bettelej.github.io/vasketid/';
-  const VERSION = '0.9.5'; // skal matche @version øverst
+  const VERSION = '0.9.6'; // skal matche @version øverst
   const SCRIPT_URL = 'https://bettelej.github.io/vasketid/vasketid.user.js';
   // Vaskerierne i den rækkefølge de ligger ned ad bakken – bruges når der skal vises en neutral liste.
   const HILL_ORDER = ['Sokkelundsvej', 'Rytterbakken', 'Svendelodden', 'Mesterstien', 'Smedetoften'];
@@ -111,7 +111,8 @@
       .slice(0, 300);
   }
 
-  // Sat, mens et Status-kald kører: går man væk fra Status, afbrydes kaldet, så Book ikke venter på det.
+  // Sat, mens et Status-kald kører: går man væk fra Status, afbrydes API-kaldet, så Book ikke venter på det.
+  // Kun API-kald (soap) – aldrig websider, hvor et afbrudt sideskift kan ødelægge sessionen.
   let statusCtrl = null;
   const linkStatus = (ctrl) => { if (statusCtrl) statusCtrl.signal.addEventListener('abort', () => ctrl.abort()); };
   const statusJob = (fn) => async () => {
@@ -123,7 +124,6 @@
     let r;
     // Tidsgrænse: hænger vasketur.dk, giver vi op efter 12 sek. i stedet for at vente på browseren.
     const ctrl = new AbortController();
-    linkStatus(ctrl);
     const { timeout = 12000, ...fetchOpts } = opts;
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
@@ -543,12 +543,12 @@
   const clearApiKey = () => store.del('apiKey');
 
   // Loft: højst 3 automatiske logins pr. 10 minutter (API + web tilsammen). Brugerens egne tryk tæller med, men stoppes ikke.
-  const LOGIN_CAP = 3;
-  const LOGIN_WINDOW = 10 * 60000;
+  const LOGIN_CAP = 4;
+  const LOGIN_WINDOW = 60 * 60000;
   let manualLogin = false;
   const hhmmOf = (t) => { const d = new Date(t); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
   // Automatiske logins venter mindst 60 s efter det forrige, så en fejl ikke giver en byge af logins.
-  const LOGIN_GAP = 60000;
+  const LOGIN_GAP = 2 * 60000;
   async function beforeLogin() {
     let log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
     if (!manualLogin && log.length) {
@@ -560,10 +560,14 @@
       log = store.get('loginLog', []).filter((t) => Date.now() - t < LOGIN_WINDOW);
     }
     if (!manualLogin && log.length >= LOGIN_CAP) {
-      throw new VtError('THROTTLE', `Appen har allerede logget ind ${LOGIN_CAP} gange de sidste 10 minutter og venter til kl. ${hhmmOf(log[0] + LOGIN_WINDOW)}, så kontoen ikke bliver spærret. Du kan selv trykke Log ind.`);
+      throw new VtError('THROTTLE', `Appen har allerede logget ind ${LOGIN_CAP} gange den sidste time og venter til kl. ${hhmmOf(log[0] + LOGIN_WINDOW)}, så kontoen ikke bliver spærret. Du kan selv trykke Log ind.`);
     }
     log.push(Date.now());
     store.set('loginLog', log);
+    // Historik for det sidste døgn – vises under ⚙, så man kan se, hvor ofte appen logger ind.
+    const hist = store.get('loginHist', []).filter((t) => Date.now() - t < 24 * 3600000);
+    hist.push(Date.now());
+    store.set('loginHist', hist);
   }
   let memCreds = null; // login tastet i denne session – kun i hukommelsen
   const timings = []; // målinger til test: {label, via, ms}
@@ -593,7 +597,7 @@
     } finally {
       clearTimeout(timer);
     }
-    if (!r.ok) throw new VtError('API', `API-fejl ${r.status} (${op})`);
+    if (!r.ok) throw new VtError('NET', 'vasketur.dk svarer ikke lige nu. Prøv igen om lidt.'); // midlertidigt – skift ikke til websiden
     const doc = new DOMParser().parseFromString(await r.text(), 'text/xml');
     const res = doc.getElementsByTagNameNS(API_NS, op + 'Result')[0];
     if (!res) throw new VtError('API', `Uventet svar fra API (${op})`);
@@ -648,7 +652,7 @@
   const apiReady = () => !api.off && !api.broken && !!(api.guid || creds());
 
   // Bruger API'et når det kan; ved uventede API-fejl skiftes til websiderne resten af sessionen.
-  async function viaApi(apiFn, webFn, label, fallback = true) {
+  async function viaApi(apiFn, webFn, label, fallback = true, keep = false) {
     const t0 = performance.now();
     let via = 'web';
     try {
@@ -658,6 +662,7 @@
           return await apiRun(apiFn);
         } catch (e) {
           if (!['API', 'APISESSION'].includes(e.code)) throw e;
+          if (keep) throw new VtError('NET', 'vasketur.dk svarer ikke lige nu. Prøv igen om lidt.');
           api.broken = e.message || 'API-fejl';
           if (!fallback) throw new VtError(e.code, 'Noget gik galt. Tjek "Mine" og prøv igen.');
           via = 'api→web';
@@ -833,7 +838,7 @@
 
   // Status for alle vaskerier i ét kald – med rigtig køre-status (Started/Done) og klar-tid.
   let statusAttempt = 1; // vises i aktivitetslinjen ved genforsøg
-  const statusLabel = (extra = '') => `Henter status${extra}${statusAttempt > 1 ? ` · forsøg ${statusAttempt} af 3` : ''}`;
+  const statusLabel = (extra = '') => `Henter status${extra}${statusAttempt > 1 ? ' · nyt forsøg' : ''}`;
   async function apiStatus() {
     step(statusLabel());
     const res = await apiCall('GetMachineGroups', {}, 30000, 'loginGuid');
@@ -1165,13 +1170,13 @@
     if (!passNow()) { S.statusError = ''; render(); return; } // uden for åbningstid: ingen kald (styringerne svarer ikke)
     S.statusError = '';
     let last;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) { // højst ét nyt forsøg
       statusAttempt = attempt;
-      S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen (${attempt} af 3)…`
+      S.statusBusy = attempt > 1 ? `Status svarede ikke. Prøver igen…`
         : apiReady() ? 'Henter status…' : 'Henter status… Det kan tage op til 20 sekunder.';
       render();
       try {
-        S.status = await serial(statusJob(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status') : Promise.reject(leftStatus()))), true);
+        S.status = await serial(statusJob(() => (onStatus() ? viaApi(apiStatus, () => withSession(loadStatusOnce), 'status', false, true) : Promise.reject(leftStatus()))), true);
         S.statusBusy = '';
         saveCache();
         render();
@@ -1659,8 +1664,7 @@
     }
     S.view = 'app';
     render();
-    refresh();
-    if (S.tab === 'status') refreshStatus();
+    refresh(); // Status hentes først, når man trykker på knappen
   }
 
   // ---------------------------------------------------------------------------
@@ -1878,6 +1882,8 @@
       return `<section class="block card closed-note"><h2>Uden for åbningstid</h2><p class="muted">Vaskerierne åbner ${toMin(nx) > nowMin() ? '' : 'i morgen '}kl. ${esc(shortTime(nx))}. Status vises igen, når de har åbent.</p></section>`;
     }
     let html = '';
+    // Status hentes kun, når man trykker – ikke hver gang man kommer forbi siden.
+    html += `<button class="btn-primary status-btn" data-act="status-retry" ${S.statusBusy ? 'disabled' : ''}>${S.statusBusy ? 'Henter status…' : S.status ? 'Opdatér status' : 'Hent status'}</button>`;
     if (S.statusError) html += `<div class="alert">${esc(S.statusError)}<button class="btn-ghost" data-act="status-retry">Prøv igen</button></div>`;
     if (S.status) {
       const order = ordered();
@@ -1909,8 +1915,10 @@
         const name = S.terms.find((t) => sameLaundry(t, L.name)) || L.name;
         html += `<section class="block card"><h2>${esc(name)}</h2>${groups}</section>`;
       }
-    } else if (!S.statusError) {
+    } else if (S.statusBusy) {
       html += '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    } else if (!S.statusError) {
+      html += '<p class="muted small">Tryk på knappen for at se, hvad maskinerne laver lige nu.</p>';
     }
     return html;
   }
@@ -2025,6 +2033,8 @@
     }
     h += `<div class="countrow"><span>Antal maskiner jeg plejer at booke</span><span class="stepper"><button data-act="count" data-d="-1">−</button><b>${S.count}</b><button data-act="count" data-d="1">+</button></span></div>`;
     h += '<button class="btn-primary" data-act="close-sheet">Færdig</button>';
+    const hist = store.get('loginHist', []).filter((t) => Date.now() - t < 24 * 3600000);
+    h += `<p class="muted small">Logins det sidste døgn: ${hist.length}${hist.length ? ` (seneste kl. ${hhmmOf(hist[hist.length - 1])})` : ''}.</p>`;
     h += `<div class="sh-foot"><a class="btn-link small" href="${HELP_URL}" target="_blank" rel="noopener">Hjælp og vejledning</a><button class="btn-link small" data-act="original">Åbn den gamle side</button>`;
     if (savedCreds()) h += '<button class="btn-link small" data-act="forget">Glem mit login på denne telefon</button>';
     h += '</div>';
@@ -2204,7 +2214,6 @@
         store.set('tab3', S.tab);
         { const sc = root.querySelector('.scroll'); if (sc) sc.scrollTop = 0; }
         render();
-        if (S.tab === 'status' && (!S.status || Date.now() - S.status.at > 60000)) refreshStatus();
         break;
       case 'refresh':
         if (S.tab === 'status') refreshStatus(); else refresh();
@@ -2333,6 +2342,7 @@
   #vt-root .grp{margin-top:10px} #vt-root .grp-h{font-weight:600;font-size:14px;margin-bottom:6px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:0 8px} #vt-root .grp-h span{white-space:nowrap}
   #vt-root .machines{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px}
   #vt-root .mach{border-radius:12px;padding:10px;text-align:center}
+  #vt-root .status-btn{margin:4px 0 8px}
   #vt-root button.mach{font:inherit;border:0;width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent} #vt-root button.mach .m-state{text-decoration:underline;text-underline-offset:3px}
   #vt-root .m-name{font-weight:700;font-size:15px} #vt-root .m-state{font-size:13px} #vt-root .m-sub{font-size:12px;opacity:.8;margin-top:2px}
   #vt-root .mach.ok{background:var(--okbg);color:var(--ok)} #vt-root .mach.res{background:var(--resbg);color:var(--res)}
@@ -2464,7 +2474,7 @@
     let startupError = null;
     if (c && !isBlocked() && !restoreApiKey()) {
       render();
-      try { await serial(apiConnect, true); } catch (e) { api.broken = e.message || 'API-login fejlede'; startupError = e; }
+      try { await serial(apiConnect, true); } catch (e) { startupError = e; }
     }
     if (isLoginPage(document) && !api.guid) {
       // Ikke et login nummer to på websiden af sig selv – brugeren trykker selv Log ind.
